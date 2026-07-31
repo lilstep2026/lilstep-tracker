@@ -135,6 +135,7 @@ tr.total-row td{font-weight:700;background:var(--paper-2);}
 .badge.good{background:var(--sage-bg);color:var(--sage);}
 .badge.watch{background:var(--ochre-bg);color:var(--ochre);}
 .badge.needs{background:var(--rose-bg);color:var(--rose);}
+.badge.locked{background:var(--blue-bg);color:var(--ink-blue);}
 .row-actions{display:flex;gap:6px;}
 .icon-btn{background:none;border:none;cursor:pointer;padding:4px;color:var(--ink-soft);border-radius:6px;}
 .icon-btn:hover{color:var(--clay);background:var(--paper-2);}
@@ -255,11 +256,17 @@ function seedState(){
     p('Waterproof Baby Ear Covers (Pack of 2)',449,95,35,10,'')
   ];
   const byName=n=>products.find(x=>x.name===n).id;
+  const assumptions = {gatewayFeePct:2, gstPct:18, codFeePct:2, rtoMultiplier:2, defaultAdvance:100, refundAdvanceOnRTO:false};
+  const snap = (prodName)=>{
+    const prod = products.find(x=>x.name===prodName);
+    return {priceSnap:prod.price, materialSnap:prod.material, packagingSnap:prod.packaging, otherSnap:prod.other,
+      gatewayFeePctSnap:assumptions.gatewayFeePct, gstPctSnap:assumptions.gstPct, codFeePctSnap:assumptions.codFeePct, rtoMultiplierSnap:assumptions.rtoMultiplier};
+  };
   const orders = [
-    {id:uid(),date:'2026-06-02',orderId:'LS1001',customer:'Priya Sharma',productId:byName('Clay Handprint & Footprint Keepsake Kit'),qty:1,discount:0,shipping:60,paymentMode:'Prepaid',advance:0,courierCost:70,status:'Delivered'},
-    {id:uid(),date:'2026-06-04',orderId:'LS1002',customer:'Anjali Mehta',productId:byName('Floral Footprint Art Kit — Soft Blush Garden'),qty:1,discount:50,shipping:0,paymentMode:'COD',advance:100,courierCost:95,status:'RTO'},
-    {id:uid(),date:'2026-06-06',orderId:'LS1003',customer:'Ritu Verma',productId:byName('Waterproof Baby Ear Covers (Pack of 2)'),qty:2,discount:0,shipping:40,paymentMode:'COD',advance:100,courierCost:70,status:'Delivered'},
-    {id:uid(),date:'2026-06-09',orderId:'LS1004',customer:'Sneha Kapoor',productId:byName('12-Month Baby Milestone Magazine'),qty:1,discount:0,shipping:0,paymentMode:'COD',advance:100,courierCost:0,status:'Cancelled'}
+    {id:uid(),date:'2026-06-02',orderId:'LS1001',customer:'Priya Sharma',productId:byName('Clay Handprint & Footprint Keepsake Kit'),qty:1,discount:0,shipping:60,paymentMode:'Prepaid',advance:0,courierCost:70,status:'Delivered',...snap('Clay Handprint & Footprint Keepsake Kit')},
+    {id:uid(),date:'2026-06-04',orderId:'LS1002',customer:'Anjali Mehta',productId:byName('Floral Footprint Art Kit — Soft Blush Garden'),qty:1,discount:50,shipping:0,paymentMode:'COD',advance:100,courierCost:95,status:'RTO',...snap('Floral Footprint Art Kit — Soft Blush Garden')},
+    {id:uid(),date:'2026-06-06',orderId:'LS1003',customer:'Ritu Verma',productId:byName('Waterproof Baby Ear Covers (Pack of 2)'),qty:2,discount:0,shipping:40,paymentMode:'COD',advance:100,courierCost:70,status:'Delivered',...snap('Waterproof Baby Ear Covers (Pack of 2)')},
+    {id:uid(),date:'2026-06-09',orderId:'LS1004',customer:'Sneha Kapoor',productId:byName('12-Month Baby Milestone Magazine'),qty:1,discount:0,shipping:0,paymentMode:'COD',advance:100,courierCost:0,status:'Cancelled',...snap('12-Month Baby Milestone Magazine')}
   ];
   const inventory = [
     {id:uid(),date:'2026-06-03',item:'Air-dry Clay (White)',supplier:'Local Bhilwara Supplier',qty:25,unit:'kg',unitCost:220,notes:'Bulk restock'},
@@ -278,121 +285,32 @@ function seedState(){
     {id:uid(),date:'2026-06-10',month:'Jun-2026',category:'Packaging Bulk Purchase',amount:0,notes:'Moved to Inventory & Stock sheet'},
     {id:uid(),date:'2026-06-15',month:'Jun-2026',category:'Software/Subscriptions',amount:1999,notes:'Shopify plan'}
   ];
-  const assumptions = {gatewayFeePct:2, gstPct:18, codFeePct:2, rtoMultiplier:2, defaultAdvance:100, refundAdvanceOnRTO:false};
   return {products,orders,inventory,bank,expenses,assumptions};
 }
 
 let state = seedState();
 let activeTab = 'dashboard';
 
-/* ================= CLOUD SYNC (free, via Firebase) =================
-   Setup (one-time, ~10 min, no cost):
-   1. Go to https://console.firebase.google.com, create a free project.
-   2. In that project, click "Firestore Database" → Create database → Production mode → pick a location.
-   3. In Firestore → Rules tab, replace the rules with:
-        rules_version = '2';
-        service cloud.firestore {
-          match /databases/{database}/documents {
-            match /trackers/{trackerId} { allow read, write: if true; }
-          }
-        }
-      (This keeps it free/open — your data is protected only by your private sync code below,
-       so never share that code publicly.)
-   4. In Project settings (gear icon) → General → "Your apps" → Add app → Web (</>) → register it.
-   5. Copy the apiKey, authDomain and projectId it gives you into FIREBASE_CONFIG right below.
-   6. Re-open this file in the browser — it'll prompt you to "Create new sync code" once.
-      Enter that same code on your other device to link it.
-   Until you fill this in, the tracker still auto-saves locally to this browser only. */
-const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyAn0vRck6xV2ZAFxZjiEp74Prfos6hfHDM",
-  authDomain: "lilstep-tracker.firebaseapp.com",
-  projectId: "lilstep-tracker"
-};
-const SYNC_ENABLED = !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId && typeof firebase!=='undefined');
-const CLIENT_ID = uid();
-let db=null, syncDocRef=null, syncKey=localStorage.getItem('lilstep_sync_key')||null;
-let applyingRemote=false, saveTimer=null;
-
-function persist(){
-  try{ localStorage.setItem('lilstep_state', JSON.stringify(state)); }catch(e){}
-  queueCloudSave();
-}
-function queueCloudSave(){
-  if(!db || !syncDocRef || applyingRemote) return;
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(pushToCloud, 1200);
-}
-function pushToCloud(){
-  if(!db || !syncDocRef) return;
-  syncDocRef.set({state, _writer:CLIENT_ID, _updatedAt:Date.now()}).catch(e=>console.warn('Cloud save failed', e));
-}
-function initSync(){
-  if(!SYNC_ENABLED) return;
-  try{ firebase.initializeApp(FIREBASE_CONFIG); db = firebase.firestore(); }
-  catch(e){ console.warn('Firebase init failed', e); return; }
-  if(!syncKey) askSyncSetup();
-  else connectSync(syncKey);
-}
-function connectSync(key, isNew){
-  if(!db) return;
-  syncKey = key;
-  syncDocRef = db.collection('trackers').doc(key);
-  syncDocRef.onSnapshot(snap=>{
-    if(!snap.exists){ if(isNew) pushToCloud(); return; }
-    const data = snap.data();
-    if(data._writer===CLIENT_ID) return; // ignore echo of our own write
-    if(data.state){
-      applyingRemote = true;
-      state = data.state;
-      try{ localStorage.setItem('lilstep_state', JSON.stringify(state)); }catch(e){}
-      renderAll();
-      applyingRemote = false;
-      toast('Synced from your other device');
+/* ================= MIGRATION: lock historical orders to the cost/fee rates that
+   were in effect when they were saved, so later edits to Product Master or
+   Settings never silently change already-recorded profit numbers. ================= */
+function migrateOrderSnapshots(){
+  let changed = false;
+  state.orders.forEach(o=>{
+    if(o.priceSnap===undefined){
+      const p = getProduct(o.productId) || {};
+      o.priceSnap = Number(o.price ?? p.price) || 0;
+      o.materialSnap = Number(p.material)||0;
+      o.packagingSnap = Number(p.packaging)||0;
+      o.otherSnap = Number(p.other)||0;
+      o.gatewayFeePctSnap = Number(state.assumptions.gatewayFeePct)||0;
+      o.gstPctSnap = Number(state.assumptions.gstPct)||0;
+      o.codFeePctSnap = Number(state.assumptions.codFeePct)||0;
+      o.rtoMultiplierSnap = Number(state.assumptions.rtoMultiplier)||1;
+      changed = true;
     }
-  }, err=>console.warn('Sync listener error', err));
-}
-function askSyncSetup(){
-  openModal(`
-    <h3>Turn on cloud sync</h3>
-    <div class="modal-sub">Link this tracker to your phone and laptop so both always show the same data — free.</div>
-    <div class="form-grid">
-      <div class="field full"><button class="btn primary" id="syncCreate" style="width:100%;justify-content:center;">Create new sync code (first device)</button></div>
-      <div class="field full"><label>Or paste a code from your other device</label><input type="text" id="syncInput" placeholder="Paste sync code here"></div>
-    </div>
-    <div class="modal-actions"><button class="btn ghost" id="syncSkip">Not now</button><button class="btn primary" id="syncJoin">Connect with this code</button></div>
-  `);
-  document.getElementById('syncSkip').addEventListener('click',closeModal);
-  document.getElementById('syncCreate').addEventListener('click',()=>{
-    const key = uid()+uid();
-    localStorage.setItem('lilstep_sync_key', key);
-    connectSync(key, true);
-    closeModal();
-    showSyncKey(key);
   });
-  document.getElementById('syncJoin').addEventListener('click',()=>{
-    const key = document.getElementById('syncInput').value.trim();
-    if(!key){ toast('Paste a sync code first'); return; }
-    localStorage.setItem('lilstep_sync_key', key);
-    connectSync(key, false);
-    closeModal();
-  });
-}
-function showSyncKey(key){
-  openModal(`
-    <h3>Your sync code</h3>
-    <div class="modal-sub">Copy this and paste it into "Or paste a code from your other device" when you open this same file on your phone/laptop. Keep it private — anyone with this code can see and edit this data.</div>
-    <div class="field full"><input type="text" id="syncKeyBox" value="${key}" readonly style="font-family:var(--font-mono);"></div>
-    <div class="modal-actions"><button class="btn primary" id="syncCopy">Copy code</button><button class="btn ghost" id="syncDone">Done</button></div>
-  `);
-  document.getElementById('syncCopy').addEventListener('click',()=>{
-    navigator.clipboard.writeText(key).then(()=>toast('Copied'));
-  });
-  document.getElementById('syncDone').addEventListener('click',closeModal);
-}
-function boot(){
-  try{ const local = localStorage.getItem('lilstep_state'); if(local) state = JSON.parse(local); }catch(e){}
-  renderAll();
-  initSync();
+  return changed;
 }
 
 /* ================= HELPERS ================= */
@@ -422,10 +340,16 @@ function toast(msg){
   clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2200);
 }
 
-/* ================= COMPUTE ================= */
+/* ================= COMPUTE =================
+   IMPORTANT: every order carries its own locked-in snapshot of price, COGS
+   components and fee/GST/RTO rates, captured at the moment it was saved.
+   computeOrder() ALWAYS uses those snapshot values (o.*Snap) — never the
+   live Product Master or Settings values — so editing a product's cost or
+   a fee % later on only affects orders you add or explicitly re-lock from
+   now on. Past, already-saved orders keep the numbers they were recorded with. */
 function computeOrder(o){
   const p = getProduct(o.productId) || {};
-  const price = Number(p.price)||0;
+  const price = Number(o.priceSnap ?? p.price)||0;
   const qty = Number(o.qty)||0;
   const discount = Number(o.discount)||0;
   const shipping = Number(o.shipping)||0;
@@ -433,18 +357,21 @@ function computeOrder(o){
   const netRevenue = grossSale + shipping;
   const advance = o.paymentMode==='Prepaid' ? netRevenue : Number(o.advance ?? state.assumptions.defaultAdvance);
   const balanceDue = netRevenue - advance;
-  const gwPct = (Number(state.assumptions.gatewayFeePct)||0)/100;
-  const gstPct = (Number(state.assumptions.gstPct)||0)/100;
+  const gwPct = (Number(o.gatewayFeePctSnap ?? state.assumptions.gatewayFeePct)||0)/100;
+  const gstPct = (Number(o.gstPctSnap ?? state.assumptions.gstPct)||0)/100;
   const gatewayFeeBase = advance*gwPct;
   const gatewayFeeGST = gatewayFeeBase*gstPct;
   const gatewayFee = gatewayFeeBase+gatewayFeeGST;
-  const codPct = (Number(state.assumptions.codFeePct)||0)/100;
+  const codPct = (Number(o.codFeePctSnap ?? state.assumptions.codFeePct)||0)/100;
   const codFee = o.status==='Delivered' ? balanceDue*codPct : 0;
-  const cogsUnit = productCOGS(p);
+  const cogsUnit = (o.materialSnap!==undefined)
+    ? (Number(o.materialSnap)||0)+(Number(o.packagingSnap)||0)+(Number(o.otherSnap)||0)
+    : productCOGS(p);
   const totalCOGS = qty*cogsUnit;
   const courierRaw = Number(o.courierCost)||0;
   const isRTO = o.status==='RTO'||o.status==='Returned';
-  const courierEff = isRTO ? courierRaw*(Number(state.assumptions.rtoMultiplier)||1) : courierRaw;
+  const rtoMult = Number(o.rtoMultiplierSnap ?? state.assumptions.rtoMultiplier)||1;
+  const courierEff = isRTO ? courierRaw*rtoMult : courierRaw;
   let grossProfit;
   if(o.status==='Cancelled'){ grossProfit = 0; }
   else if(isRTO){
@@ -481,7 +408,7 @@ function dashboardRows(){
     const otherExpenses = totalExpenses-marketing;
     const netProfit = grossProfit-totalExpenses;
     const netMargin = netRevenue===0?0:netProfit/netRevenue;
-    return {month:m,total,delivered,rto,cancelled,rtoRate,grossSales,netRevenue,totalCOGS,grossProfit,marketing,otherExpenses,totalExpenses,netProfit,netMargin};
+    return {month:m,total,delivered,rto,cancelled,rtoRate,grossSales,netRevenue,totalCOGS,grossProfit,marketing,otherExpenses,totalExpenses,netProfit,netMargin,orders:ords,expensesList:exps};
   });
   return rows;
 }
@@ -587,6 +514,7 @@ function renderDashboard(c){
   c.innerHTML = `
     <div class="section-head">
       <div><h2>Profit &amp; Loss Dashboard</h2><p>Auto-calculated from Orders, Expenses and your Bank ledger. Nothing to type here.</p></div>
+      <button class="btn primary" id="btnMonthlyReport">⬇ Download Monthly Report (PDF)</button>
     </div>
     <div class="grid-kpi">
       <div class="kpi"><div class="lbl">Live bank balance</div><div class="val">${fmt(liveBalance())}</div></div>
@@ -620,6 +548,7 @@ function renderDashboard(c){
       </tbody>
     </table></div>
   `;
+  document.getElementById('btnMonthlyReport').addEventListener('click',()=>monthlyReportModal(rows));
   if(rows.length){
     const ctx = document.getElementById('dashChart');
     if(chartRef) chartRef.destroy();
@@ -634,6 +563,120 @@ function renderDashboard(c){
         plugins:{legend:{position:'bottom', labels:{font:{family:'Inter'}}}}}
     });
   }
+}
+
+/* ================= MONTHLY REPORT (PDF) ================= */
+function monthlyReportModal(rows){
+  if(!rows.length){ toast('No data yet to build a report from'); return; }
+  const opts = rows.slice().reverse().map(r=>`<option value="${r.month}">${r.month}</option>`).join('');
+  openModal(`
+    <h3>Download Monthly Report</h3>
+    <div class="modal-sub">Choose the month to export as a PDF — includes the P&amp;L summary and every order for that month.</div>
+    <div class="form-grid">
+      <div class="field full"><label>Month</label><select id="rp_month">${opts}</select></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="mCancel">Cancel</button>
+      <button class="btn primary" id="mGenerate">Generate PDF</button>
+    </div>
+  `);
+  document.getElementById('mCancel').addEventListener('click',closeModal);
+  document.getElementById('mGenerate').addEventListener('click',()=>{
+    const month = document.getElementById('rp_month').value;
+    const row = rows.find(r=>r.month===month);
+    generateMonthlyPDF(row);
+    closeModal();
+  });
+}
+function ensurePdfLibs(cb){
+  if(window.jspdf && window.jspdf.jsPDF){ cb(); return; }
+  const s1 = document.createElement('script');
+  s1.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+  s1.onload = ()=>{
+    const s2 = document.createElement('script');
+    s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js';
+    s2.onload = cb;
+    s2.onerror = ()=>toast('Could not load PDF library — check your internet connection');
+    document.head.appendChild(s2);
+  };
+  s1.onerror = ()=>toast('Could not load PDF library — check your internet connection');
+  document.head.appendChild(s1);
+}
+function generateMonthlyPDF(row){
+  ensurePdfLibs(()=>{
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({unit:'pt', format:'a4'});
+    const marginL = 40;
+    let y = 50;
+
+    doc.setFont('helvetica','bold'); doc.setFontSize(18); doc.setTextColor(40,30,25);
+    doc.text('LilStep — Monthly Report', marginL, y);
+    y += 20;
+    doc.setFont('helvetica','normal'); doc.setFontSize(12); doc.setTextColor(100,90,80);
+    doc.text(row.month, marginL, y);
+    y += 10;
+    doc.setDrawColor(220,210,190); doc.line(marginL, y, 555, y);
+    y += 22;
+
+    doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(40,30,25);
+    doc.text('Summary', marginL, y);
+    y += 8;
+
+    const summaryBody = [
+      ['Total orders', row.total, 'Delivered', row.delivered],
+      ['RTO / Returned', row.rto, 'Cancelled', row.cancelled],
+      ['RTO rate', (row.rtoRate*100).toFixed(1)+'%', 'Gross sales', 'Rs. '+row.grossSales.toLocaleString('en-IN')],
+      ['Net revenue', 'Rs. '+row.netRevenue.toLocaleString('en-IN'), 'COGS', 'Rs. '+row.totalCOGS.toLocaleString('en-IN')],
+      ['Gross profit', 'Rs. '+row.grossProfit.toLocaleString('en-IN'), 'Marketing spend', 'Rs. '+row.marketing.toLocaleString('en-IN')],
+      ['Other expenses', 'Rs. '+row.otherExpenses.toLocaleString('en-IN'), 'Total expenses', 'Rs. '+row.totalExpenses.toLocaleString('en-IN')],
+      ['Net profit', 'Rs. '+row.netProfit.toLocaleString('en-IN'), 'Net margin', (row.netMargin*100).toFixed(1)+'%']
+    ];
+    doc.autoTable({
+      startY: y+6, margin:{left:marginL,right:40}, theme:'plain', styles:{fontSize:9.5, cellPadding:4, textColor:[40,30,25]},
+      columnStyles:{0:{fontStyle:'bold',cellWidth:110},1:{cellWidth:145},2:{fontStyle:'bold',cellWidth:110},3:{cellWidth:110}},
+      body: summaryBody
+    });
+    y = doc.lastAutoTable.finalY + 24;
+
+    doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(40,30,25);
+    doc.text('Orders this month', marginL, y);
+    y += 6;
+    const orderBody = row.orders.map(o=>[
+      o.date||'—', o.orderId||'', o.customer||'—', o.productName||'', o.qty,
+      o.status||'', 'Rs. '+Math.round(o.netRevenue).toLocaleString('en-IN'),
+      'Rs. '+Math.round(o.grossProfit).toLocaleString('en-IN')
+    ]);
+    doc.autoTable({
+      startY: y+6, margin:{left:marginL,right:40}, theme:'striped', headStyles:{fillColor:[189,91,52]},
+      styles:{fontSize:8.5, cellPadding:4},
+      head:[['Date','Order ID','Customer','Product','Qty','Status','Net Revenue','Gross Profit']],
+      body: orderBody.length ? orderBody : [['—','No orders logged for this month','','','','','','']]
+    });
+    y = doc.lastAutoTable.finalY + 24;
+
+    if(row.expensesList && row.expensesList.length){
+      if(y > 700){ doc.addPage(); y = 50; }
+      doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(40,30,25);
+      doc.text('Expenses this month', marginL, y);
+      y += 6;
+      const expBody = row.expensesList.map(e=>[e.date, e.category, 'Rs. '+Number(e.amount).toLocaleString('en-IN'), e.notes||'']);
+      doc.autoTable({
+        startY: y+6, margin:{left:marginL,right:40}, theme:'striped', headStyles:{fillColor:[94,124,85]},
+        styles:{fontSize:8.5, cellPadding:4},
+        head:[['Date','Category','Amount','Notes']],
+        body: expBody
+      });
+    }
+
+    const pageCount = doc.internal.getNumberOfPages();
+    for(let i=1;i<=pageCount;i++){
+      doc.setPage(i);
+      doc.setFontSize(8); doc.setTextColor(140,130,120);
+      doc.text('Generated '+new Date().toLocaleDateString('en-IN')+' — LilStep Finance Tracker', marginL, 815);
+    }
+    doc.save(`LilStep-Report-${row.month}.pdf`);
+    toast('Report downloaded');
+  });
 }
 
 /* ================= GENERIC MODAL ================= */
@@ -665,10 +708,10 @@ function renderOrders(c){
   const partialRows = rows.filter(o=>o.paymentMode==='COD' && o.status==='In Transit');
   c.innerHTML = `
     <div class="section-head">
-      <div><h2>Orders</h2><p>One row per order. Price and COGS pull automatically from Product Master.</p></div>
+      <div><h2>Orders</h2><p>One row per order. Price and COGS are locked in from Product Master at the moment each order is saved — editing Product Master or Settings later won't change past orders.</p></div>
       <button class="btn primary" id="addOrder">+ Add order</button>
     </div>
-    <div class="callout"><b>Gateway fee update:</b> ${gw}% payment-gateway fee + ${gst}% GST on that fee is now applied to every online-collected amount (advance or full prepaid) — effective rate ${eff}%. Adjust anytime in Settings.</div>
+    <div class="callout"><b>Gateway fee (for new orders):</b> ${gw}% payment-gateway fee + ${gst}% GST on that fee is applied to every online-collected amount going forward — effective rate ${eff}%. Adjust anytime in Settings; it will only apply to orders saved after the change.</div>
     <div class="table-wrap"><table>
       <thead><tr>
         <th>Date</th><th>Order ID</th><th>Customer</th><th>Product</th><th class="num">Qty</th><th class="num">Price</th>
@@ -687,6 +730,7 @@ function renderOrders(c){
             <td class="num" style="color:${gpColor(o)};font-weight:600;">${fmt(o.grossProfit)}</td>
             <td><div class="row-actions">
               <button class="icon-btn" data-edit="${o.id}" title="Edit">${iconPencil()}</button>
+              <button class="icon-btn" data-relock="${o.id}" title="Update this order to today's rates &amp; product cost">${iconRefresh()}</button>
               <button class="icon-btn" data-del="${o.id}" title="Delete">${iconTrash()}</button>
             </div></td>
           </tr>`).join('') : `<tr><td colspan="18" class="empty">No orders yet. Click “Add order” to log your first one.</td></tr>`}
@@ -725,6 +769,21 @@ function renderOrders(c){
   c.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',()=>{
     if(confirm('Delete this order?')){state.orders=state.orders.filter(o=>o.id!==b.dataset.del); toast('Order deleted'); renderAll();}
   }));
+  c.querySelectorAll('[data-relock]').forEach(b=>b.addEventListener('click',()=>{
+    if(confirm('Re-lock this order to today\'s Product Master cost and Settings fee rates? This changes its recorded profit.')){
+      const o = state.orders.find(x=>x.id===b.dataset.relock);
+      const p = getProduct(o.productId) || {};
+      o.priceSnap = Number(p.price)||0;
+      o.materialSnap = Number(p.material)||0;
+      o.packagingSnap = Number(p.packaging)||0;
+      o.otherSnap = Number(p.other)||0;
+      o.gatewayFeePctSnap = Number(state.assumptions.gatewayFeePct)||0;
+      o.gstPctSnap = Number(state.assumptions.gstPct)||0;
+      o.codFeePctSnap = Number(state.assumptions.codFeePct)||0;
+      o.rtoMultiplierSnap = Number(state.assumptions.rtoMultiplier)||1;
+      toast('Order updated to current rates'); renderAll();
+    }
+  }));
 }
 function orderModal(id){
   const editing = id ? state.orders.find(o=>o.id===id) : null;
@@ -732,7 +791,7 @@ function orderModal(id){
   const productOpts = state.products.filter(p=>p.name).map(p=>`<option value="${p.id}" ${p.id===o.productId?'selected':''}>${p.name}</option>`).join('');
   openModal(`
     <h3>${editing?'Edit order':'Add order'}</h3>
-    <div class="modal-sub">Blue fields only — price, COGS and profit are calculated for you.</div>
+    <div class="modal-sub">${editing? 'This order keeps the product cost &amp; fee rates it was originally saved with. Change the product below to re-lock cost to that product\'s current price, or use the refresh icon in the table to pull today\'s rates.' : 'Blue fields only — price, COGS and profit are calculated for you and locked in at today\'s rates once saved.'}</div>
     <div class="form-grid">
       <div class="field"><label>Order date</label><input type="date" id="f_date" value="${o.date||''}"></div>
       <div class="field"><label>Order ID</label><input type="text" id="f_orderId" value="${o.orderId||''}"></div>
@@ -762,12 +821,14 @@ function orderModal(id){
   });
   document.getElementById('mCancel').addEventListener('click',closeModal);
   document.getElementById('mSave').addEventListener('click',()=>{
+    const newProductId = document.getElementById('f_product').value;
+    const productChanged = !editing || newProductId !== editing.productId;
     const rec = {
       id: editing?editing.id:uid(),
       date: document.getElementById('f_date').value,
       orderId: document.getElementById('f_orderId').value||nextOrderId(),
       customer: document.getElementById('f_customer').value,
-      productId: document.getElementById('f_product').value,
+      productId: newProductId,
       qty: Number(document.getElementById('f_qty').value)||1,
       discount: Number(document.getElementById('f_discount').value)||0,
       shipping: Number(document.getElementById('f_shipping').value)||0,
@@ -776,6 +837,28 @@ function orderModal(id){
       courierCost: Number(document.getElementById('f_courier').value)||0,
       status: document.getElementById('f_status').value
     };
+    if(editing && !productChanged){
+      // keep this order's original locked-in cost & fee snapshot untouched
+      rec.priceSnap = editing.priceSnap;
+      rec.materialSnap = editing.materialSnap;
+      rec.packagingSnap = editing.packagingSnap;
+      rec.otherSnap = editing.otherSnap;
+      rec.gatewayFeePctSnap = editing.gatewayFeePctSnap;
+      rec.gstPctSnap = editing.gstPctSnap;
+      rec.codFeePctSnap = editing.codFeePctSnap;
+      rec.rtoMultiplierSnap = editing.rtoMultiplierSnap;
+    } else {
+      // new order, or product was switched: lock in today's product cost & today's fee rates
+      const p = getProduct(newProductId) || {};
+      rec.priceSnap = Number(p.price)||0;
+      rec.materialSnap = Number(p.material)||0;
+      rec.packagingSnap = Number(p.packaging)||0;
+      rec.otherSnap = Number(p.other)||0;
+      rec.gatewayFeePctSnap = Number(state.assumptions.gatewayFeePct)||0;
+      rec.gstPctSnap = Number(state.assumptions.gstPct)||0;
+      rec.codFeePctSnap = Number(state.assumptions.codFeePct)||0;
+      rec.rtoMultiplierSnap = Number(state.assumptions.rtoMultiplier)||1;
+    }
     if(editing){ state.orders = state.orders.map(o=>o.id===editing.id?rec:o); toast('Order updated'); }
     else { state.orders.push(rec); toast('Order added'); }
     closeModal(); renderAll();
@@ -783,12 +866,13 @@ function orderModal(id){
 }
 function iconPencil(){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';}
 function iconTrash(){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>';}
+function iconRefresh(){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';}
 
 /* ================= PRODUCTS ================= */
 function renderProducts(c){
   c.innerHTML = `
     <div class="section-head">
-      <div><h2>Product Master</h2><p>Set each product's true cost once. Orders and Product Performance both pull from here.</p></div>
+      <div><h2>Product Master</h2><p>Set each product's true cost once. New orders pull from here — orders already saved keep the cost they were recorded with.</p></div>
       <button class="btn primary" id="addProduct">+ Add product</button>
     </div>
     <div class="table-wrap"><table>
@@ -819,7 +903,7 @@ function productModal(id){
   const p = editing || {name:'',price:0,material:0,packaging:0,other:0,notes:''};
   openModal(`
     <h3>${editing?'Edit product':'Add product'}</h3>
-    <div class="modal-sub">Total COGS is calculated automatically as material + packaging + other.</div>
+    <div class="modal-sub">Total COGS is calculated automatically as material + packaging + other. Changing these numbers only affects orders you add or re-lock from now on — past orders keep their original recorded cost.</div>
     <div class="form-grid">
       <div class="field full"><label>Product name</label><input type="text" id="f_name" value="${p.name}"></div>
       <div class="field"><label>Selling price (₹)</label><input type="number" id="f_price" value="${p.price}"></div>
@@ -1061,12 +1145,12 @@ function renderSettings(c){
       : `<div class="callout">Cloud sync is available but not linked on this device yet.</div>
          <div class="modal-actions" style="margin-top:10px;"><button class="btn primary" id="s_setup">Set up sync</button></div>`;
   c.innerHTML = `
-    <div class="section-head"><div><h2>Settings &amp; Assumptions</h2><p>These drive every calculation across Orders, Dashboard and Product Performance.</p></div></div>
+    <div class="section-head"><div><h2>Settings &amp; Assumptions</h2><p>These drive calculations for <b>new orders only</b> — orders already saved keep the rates they were recorded with (see the ↻ icon on the Orders tab if you ever want to pull a specific past order up to today's rates).</p></div></div>
     <div class="card" style="margin-bottom:20px;">
       <div class="section-head" style="margin-bottom:8px;"><div><h3 style="font-family:var(--font-display);font-size:16px;margin:0;">Cloud Sync</h3></div></div>
       ${syncStatusHtml}
     </div>
-    <div class="callout sage"><b>What changed:</b> the payment-gateway fee is now split into a ${a.gatewayFeePct}% base fee plus ${a.gstPct}% GST charged on top of that fee — effective rate <b>${eff}%</b> of every online-collected amount, instead of one flat rate.</div>
+    <div class="callout sage"><b>How this works now:</b> the payment-gateway fee (${a.gatewayFeePct}% base + ${a.gstPct}% GST on that fee, effective <b>${eff}%</b>), COD fee and RTO multiplier below apply to orders from the moment you save them. Changing a number here does <b>not</b> retroactively change orders you already logged.</div>
     <div class="card">
       <div class="assump-grid">
         <div class="field"><label>Gateway fee % (on advance/prepaid)</label><input type="number" step="0.01" id="a_gw" value="${a.gatewayFeePct}"></div>
@@ -1079,7 +1163,7 @@ function renderSettings(c){
           <option value="yes" ${a.refundAdvanceOnRTO?'selected':''}>Yes (refund in full)</option>
         </select></div>
       </div>
-      <div class="hint">Effective gateway rate right now: <b>${eff}%</b> of every advance / prepaid amount collected.</div>
+      <div class="hint">Effective gateway rate for orders saved from now on: <b>${eff}%</b> of every advance / prepaid amount collected.</div>
       <div class="modal-actions" style="margin-top:18px;">
         <button class="btn" id="a_reset">Reset to demo data</button>
         <button class="btn danger" id="a_clear">Clear all data</button>
@@ -1108,7 +1192,7 @@ function renderSettings(c){
       defaultAdvance: Number(document.getElementById('a_adv').value)||0,
       refundAdvanceOnRTO: document.getElementById('a_refund').value==='yes'
     };
-    toast('Assumptions saved'); renderAll();
+    toast('Assumptions saved — this applies to new orders from now on'); renderAll();
   });
   document.getElementById('a_reset').addEventListener('click',()=>{
     if(confirm('Replace current data with the demo dataset?')){state=seedState(); toast('Demo data restored'); renderAll();}
@@ -1119,6 +1203,118 @@ function renderSettings(c){
       toast('All data cleared'); renderAll();
     }
   });
+}
+
+/* ================= CLOUD SYNC (free, via Firebase) =================
+   Setup (one-time, ~10 min, no cost):
+   1. Go to https://console.firebase.google.com, create a free project.
+   2. In that project, click "Firestore Database" → Create database → Production mode → pick a location.
+   3. In Firestore → Rules tab, replace the rules with:
+        rules_version = '2';
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /trackers/{trackerId} { allow read, write: if true; }
+          }
+        }
+      (This keeps it free/open — your data is protected only by your private sync code below,
+       so never share that code publicly.)
+   4. In Project settings (gear icon) → General → "Your apps" → Add app → Web (</>) → register it.
+   5. Copy the apiKey, authDomain and projectId it gives you into FIREBASE_CONFIG right below.
+   6. Re-open this file in the browser — it'll prompt you to "Create new sync code" once.
+      Enter that same code on your other device to link it.
+   Until you fill this in, the tracker still auto-saves locally to this browser only. */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAn0vRck6xV2ZAFxZjiEp74Prfos6hfHDM",
+  authDomain: "lilstep-tracker.firebaseapp.com",
+  projectId: "lilstep-tracker"
+};
+const SYNC_ENABLED = !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId && typeof firebase!=='undefined');
+const CLIENT_ID = uid();
+let db=null, syncDocRef=null, syncKey=localStorage.getItem('lilstep_sync_key')||null;
+let applyingRemote=false, saveTimer=null;
+
+function persist(){
+  try{ localStorage.setItem('lilstep_state', JSON.stringify(state)); }catch(e){}
+  queueCloudSave();
+}
+function queueCloudSave(){
+  if(!db || !syncDocRef || applyingRemote) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(pushToCloud, 1200);
+}
+function pushToCloud(){
+  if(!db || !syncDocRef) return;
+  syncDocRef.set({state, _writer:CLIENT_ID, _updatedAt:Date.now()}).catch(e=>console.warn('Cloud save failed', e));
+}
+function initSync(){
+  if(!SYNC_ENABLED) return;
+  try{ firebase.initializeApp(FIREBASE_CONFIG); db = firebase.firestore(); }
+  catch(e){ console.warn('Firebase init failed', e); return; }
+  if(!syncKey) askSyncSetup();
+  else connectSync(syncKey);
+}
+function connectSync(key, isNew){
+  if(!db) return;
+  syncKey = key;
+  syncDocRef = db.collection('trackers').doc(key);
+  syncDocRef.onSnapshot(snap=>{
+    if(!snap.exists){ if(isNew) pushToCloud(); return; }
+    const data = snap.data();
+    if(data._writer===CLIENT_ID) return; // ignore echo of our own write
+    if(data.state){
+      applyingRemote = true;
+      state = data.state;
+      migrateOrderSnapshots();
+      try{ localStorage.setItem('lilstep_state', JSON.stringify(state)); }catch(e){}
+      renderAll();
+      applyingRemote = false;
+      toast('Synced from your other device');
+    }
+  }, err=>console.warn('Sync listener error', err));
+}
+function askSyncSetup(){
+  openModal(`
+    <h3>Turn on cloud sync</h3>
+    <div class="modal-sub">Link this tracker to your phone and laptop so both always show the same data — free.</div>
+    <div class="form-grid">
+      <div class="field full"><button class="btn primary" id="syncCreate" style="width:100%;justify-content:center;">Create new sync code (first device)</button></div>
+      <div class="field full"><label>Or paste a code from your other device</label><input type="text" id="syncInput" placeholder="Paste sync code here"></div>
+    </div>
+    <div class="modal-actions"><button class="btn ghost" id="syncSkip">Not now</button><button class="btn primary" id="syncJoin">Connect with this code</button></div>
+  `);
+  document.getElementById('syncSkip').addEventListener('click',closeModal);
+  document.getElementById('syncCreate').addEventListener('click',()=>{
+    const key = uid()+uid();
+    localStorage.setItem('lilstep_sync_key', key);
+    connectSync(key, true);
+    closeModal();
+    showSyncKey(key);
+  });
+  document.getElementById('syncJoin').addEventListener('click',()=>{
+    const key = document.getElementById('syncInput').value.trim();
+    if(!key){ toast('Paste a sync code first'); return; }
+    localStorage.setItem('lilstep_sync_key', key);
+    connectSync(key, false);
+    closeModal();
+  });
+}
+function showSyncKey(key){
+  openModal(`
+    <h3>Your sync code</h3>
+    <div class="modal-sub">Copy this and paste it into "Or paste a code from your other device" when you open this same file on your phone/laptop. Keep it private — anyone with this code can see and edit this data.</div>
+    <div class="field full"><input type="text" id="syncKeyBox" value="${key}" readonly style="font-family:var(--font-mono);"></div>
+    <div class="modal-actions"><button class="btn primary" id="syncCopy">Copy code</button><button class="btn ghost" id="syncDone">Done</button></div>
+  `);
+  document.getElementById('syncCopy').addEventListener('click',()=>{
+    navigator.clipboard.writeText(key).then(()=>toast('Copied'));
+  });
+  document.getElementById('syncDone').addEventListener('click',closeModal);
+}
+function boot(){
+  try{ const local = localStorage.getItem('lilstep_state'); if(local) state = JSON.parse(local); }catch(e){}
+  migrateOrderSnapshots();
+  renderAll();
+  initSync();
 }
 
 /* ================= EXPORT / IMPORT ================= */
@@ -1138,7 +1334,9 @@ document.getElementById('fileImport').addEventListener('change',e=>{
     try{
       const data = JSON.parse(ev.target.result);
       if(!data.products || !data.orders) throw new Error('bad shape');
-      state = data; toast('Data imported'); renderAll();
+      state = data;
+      migrateOrderSnapshots();
+      toast('Data imported'); renderAll();
     }catch(err){ toast('Could not read that file'); }
   };
   reader.readAsText(file);
