@@ -136,6 +136,7 @@ tr.total-row td{font-weight:700;background:var(--paper-2);}
 .badge.watch{background:var(--ochre-bg);color:var(--ochre);}
 .badge.needs{background:var(--rose-bg);color:var(--rose);}
 .badge.locked{background:var(--blue-bg);color:var(--ink-blue);}
+.badge.unfulfilled{background:var(--ochre-bg);color:var(--ochre);}
 .row-actions{display:flex;gap:6px;}
 .icon-btn{background:none;border:none;cursor:pointer;padding:4px;color:var(--ink-soft);border-radius:6px;}
 .icon-btn:hover{color:var(--clay);background:var(--paper-2);}
@@ -679,6 +680,145 @@ function generateMonthlyPDF(row){
   });
 }
 
+/* ================= SHOPIFY CSV IMPORT =================
+   Mapping used, per your workflow:
+   - Name                -> Order ID (multiple line items sharing the same Name
+                            become multiple order rows sharing that Order ID —
+                            the app already sums profit across rows regardless
+                            of Order ID, so multi-product orders total correctly).
+   - Billing/Shipping Name -> Customer
+   - Discount Amount     -> Discount (applied once, on the first line of an order,
+                            so it isn't double-counted across line items)
+   - Shipping            -> Shipping charged (also first line only)
+   - Lineitem quantity   -> Qty
+   - Lineitem price      -> Price (locked in as that order's price snapshot)
+   - Lineitem name       -> matched to an existing Product Master entry by name;
+                            if no match exists, a new product is auto-created
+                            (COGS defaults to 0 — set it in Product Master after import)
+   - Financial Status    -> Payment Mode:
+       "paid"              -> Prepaid, full amount treated as advance
+       "partially_paid"    -> COD, advance = Total − Outstanding Balance
+       anything else / pending -> COD, advance = your default COD advance
+                            (Settings), matching the ₹100-shipping-advance-then-
+                            balance-on-delivery flow you described
+   - New status "Unfulfilled" is added and every imported order defaults to it,
+     whether or not it already shows as fulfilled/unfulfilled in Shopify —
+     you then move it to In Transit / Delivered / RTO etc. from your own workflow.
+   - Cost & fee rates are locked in (snapshotted) at import time, same as any
+     other order, so later Product Master / Settings edits won't touch these. */
+function ensureCsvLib(cb){
+  if(window.Papa){ cb(); return; }
+  const s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js';
+  s.onload = cb;
+  s.onerror = ()=>toast('Could not load CSV parser — check your internet connection');
+  document.head.appendChild(s);
+}
+function parseShopifyDate(s){
+  if(!s || !s.trim()) return new Date().toISOString().slice(0,10);
+  return s.trim().slice(0,10);
+}
+function findOrCreateProduct(lineName, linePrice){
+  const name = (lineName||'').trim();
+  if(!name) return null;
+  let existing = state.products.find(x=>(x.name||'').trim().toLowerCase()===name.toLowerCase());
+  if(existing) return {product:existing, isNew:false};
+  const created = {id:uid(), name, price:Number(linePrice)||0, material:0, packaging:0, other:0, notes:'Auto-added from Shopify import — set its material/packaging/other cost here'};
+  state.products.push(created);
+  return {product:created, isNew:true};
+}
+function importShopifyOrders(csvText){
+  ensureCsvLib(()=>{
+    let parsed;
+    try{ parsed = Papa.parse(csvText, {header:true, skipEmptyLines:true}); }
+    catch(err){ toast('Could not read that CSV file'); return; }
+    const rows = (parsed && parsed.data) || [];
+    if(!rows.length || !('Name' in rows[0])){ toast('This doesn\'t look like a Shopify orders export'); return; }
+
+    // group line-item rows by Order Name, preserving file order
+    const groups = new Map();
+    rows.forEach(row=>{
+      const name = (row['Name']||'').trim();
+      if(!name) return;
+      if(!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(row);
+    });
+
+    const existingOrderIds = new Set(state.orders.map(o=>o.orderId));
+    let importedOrders=0, importedLines=0, skipped=0;
+    const newProductNames=[];
+
+    groups.forEach((lineRows, name)=>{
+      if(existingOrderIds.has(name)){ skipped++; return; }
+      // order-level fields only appear on the first row of a multi-line Shopify order
+      const head = lineRows.find(r=>(r['Financial Status']||'').trim()) || lineRows[0];
+      const date = parseShopifyDate(head['Created at']);
+      const customer = ((head['Shipping Name']||head['Billing Name']||'')).trim();
+      const discount = Number(head['Discount Amount'])||0;
+      const shipping = Number(head['Shipping'])||0;
+      const total = Number(head['Total'])||Number(head['Subtotal'])||0;
+      const outstandingRaw = head['Outstanding Balance'];
+      const outstanding = (outstandingRaw!==undefined && outstandingRaw!=='') ? Number(outstandingRaw) : null;
+      const finStatus = (head['Financial Status']||'').trim().toLowerCase();
+      const wasCancelled = !!(head['Cancelled at'] && head['Cancelled at'].trim());
+
+      let paymentMode, advanceTotal;
+      if(finStatus==='paid'){
+        paymentMode='Prepaid'; advanceTotal = total;
+      } else if(finStatus==='partially_paid' && outstanding!==null){
+        paymentMode='COD'; advanceTotal = Math.max(0, total-outstanding);
+      } else if(finStatus==='refunded' || finStatus==='voided'){
+        paymentMode='COD'; advanceTotal = 0;
+      } else {
+        paymentMode='COD'; advanceTotal = Number(state.assumptions.defaultAdvance)||0;
+      }
+
+      let lineIdx=0;
+      lineRows.forEach(row=>{
+        const lineName = row['Lineitem name'];
+        if(!lineName || !lineName.trim()) return;
+        const qty = Number(row['Lineitem quantity'])||1;
+        const linePrice = Number(row['Lineitem price'])||0;
+        const found = findOrCreateProduct(lineName, linePrice);
+        if(!found) return;
+        if(found.isNew) newProductNames.push(found.product.name);
+        const isFirst = lineIdx===0;
+        state.orders.push({
+          id: uid(), date, orderId:name, customer, productId:found.product.id, qty,
+          discount: isFirst?discount:0, shipping: isFirst?shipping:0,
+          paymentMode, advance: isFirst?advanceTotal:0, courierCost:0,
+          status: wasCancelled?'Cancelled':'Unfulfilled',
+          priceSnap: linePrice,
+          materialSnap: Number(found.product.material)||0,
+          packagingSnap: Number(found.product.packaging)||0,
+          otherSnap: Number(found.product.other)||0,
+          gatewayFeePctSnap: Number(state.assumptions.gatewayFeePct)||0,
+          gstPctSnap: Number(state.assumptions.gstPct)||0,
+          codFeePctSnap: Number(state.assumptions.codFeePct)||0,
+          rtoMultiplierSnap: Number(state.assumptions.rtoMultiplier)||1
+        });
+        importedLines++;
+        lineIdx++;
+      });
+      if(lineIdx>0) importedOrders++;
+    });
+
+    renderAll();
+    const uniqueNewProducts = [...new Set(newProductNames)];
+    openModal(`
+      <h3>Shopify import complete</h3>
+      <div class="modal-sub">
+        Imported <b>${importedOrders}</b> order${importedOrders===1?'':'s'} (${importedLines} line item${importedLines===1?'':'s'}).<br>
+        ${skipped? `Skipped <b>${skipped}</b> order${skipped===1?'':'s'} already in your tracker (matched by Order ID) — re-running the same file is safe.<br>`:''}
+        ${uniqueNewProducts.length? `Added <b>${uniqueNewProducts.length}</b> new product${uniqueNewProducts.length===1?'':'s'} to Product Master with cost set to ₹0 — open Product Master and fill in material/packaging/other cost:<br><i>${uniqueNewProducts.join(', ')}</i><br>`:''}
+        All imported orders are marked <b>Unfulfilled</b>. Orders with 2–3 products together show up as multiple rows sharing the same Order ID in the Orders table.
+      </div>
+      <div class="modal-actions"><button class="btn primary" id="mDone">Done</button></div>
+    `);
+    document.getElementById('mDone').addEventListener('click',closeModal);
+  });
+}
+
 /* ================= GENERIC MODAL ================= */
 function openModal(html){
   document.getElementById('modalBox').innerHTML = html;
@@ -694,22 +834,26 @@ function nextOrderId(){
   return 'LS'+n;
 }
 function statusBadge(s){
-  const cls = s==='Delivered'?'delivered':(s==='RTO'||s==='Returned')?'rto':s==='Cancelled'?'cancelled':'transit';
-  return `<span class="badge ${cls}">${s||'In Transit'}</span>`;
+  const cls = s==='Delivered'?'delivered':(s==='RTO'||s==='Returned')?'rto':s==='Cancelled'?'cancelled':s==='Unfulfilled'?'unfulfilled':'transit';
+  return `<span class="badge ${cls}">${s||'Unfulfilled'}</span>`;
 }
 function gpColor(o){
-  if(o.status==='In Transit') return 'var(--ochre)';
+  if(o.status==='In Transit'||o.status==='Unfulfilled') return 'var(--ochre)';
   return o.grossProfit>=0?'var(--sage)':'var(--rose)';
 }
 function renderOrders(c){
   const rows = state.orders.map(computeOrder).sort((a,b)=>(a.date<b.date?1:-1));
   const gw = state.assumptions.gatewayFeePct, gst = state.assumptions.gstPct;
   const eff = (gw*(1+gst/100)).toFixed(2);
-  const partialRows = rows.filter(o=>o.paymentMode==='COD' && o.status==='In Transit');
+  const partialRows = rows.filter(o=>o.paymentMode==='COD' && (o.status==='In Transit'||o.status==='Unfulfilled'));
   c.innerHTML = `
     <div class="section-head">
-      <div><h2>Orders</h2><p>One row per order. Price and COGS are locked in from Product Master at the moment each order is saved — editing Product Master or Settings later won't change past orders.</p></div>
-      <button class="btn primary" id="addOrder">+ Add order</button>
+      <div><h2>Orders</h2><p>One row per order line. Price and COGS are locked in from Product Master at the moment each order is saved — editing Product Master or Settings later won't change past orders. Orders with 2–3 products together from Shopify appear as multiple rows sharing the same Order ID.</p></div>
+      <div class="top-actions">
+        <button class="btn" id="btnShopifyImport">⬆ Import from Shopify (CSV)</button>
+        <input type="file" id="fileShopifyImport" accept=".csv" style="display:none">
+        <button class="btn primary" id="addOrder">+ Add order</button>
+      </div>
     </div>
     <div class="callout"><b>Gateway fee (for new orders):</b> ${gw}% payment-gateway fee + ${gst}% GST on that fee is applied to every online-collected amount going forward — effective rate ${eff}%. Adjust anytime in Settings; it will only apply to orders saved after the change.</div>
     <div class="table-wrap"><table>
@@ -739,7 +883,7 @@ function renderOrders(c){
 
     <div class="stitch"></div>
     <div class="section-head">
-      <div><h2>Partial COD Orders — In Transit</h2><p>COD orders with an advance collected that are currently in transit. Once you mark an order Delivered, Cancelled, RTO or Returned, it drops off this list automatically.</p></div>
+      <div><h2>Partial COD Orders — Unfulfilled / In Transit</h2><p>COD orders with an advance collected that haven't been resolved yet — including new Shopify imports (marked Unfulfilled by default). Once you mark an order Delivered, Cancelled, RTO or Returned, it drops off this list automatically.</p></div>
     </div>
     <div class="table-wrap"><table>
       <thead><tr>
@@ -765,6 +909,15 @@ function renderOrders(c){
     </table></div>
   `;
   c.querySelector('#addOrder').addEventListener('click',()=>orderModal());
+  c.querySelector('#btnShopifyImport').addEventListener('click',()=>c.querySelector('#fileShopifyImport').click());
+  c.querySelector('#fileShopifyImport').addEventListener('change',e=>{
+    const file = e.target.files[0]; if(!file) return;
+    const reader = new FileReader();
+    reader.onload = ev=>importShopifyOrders(ev.target.result);
+    reader.onerror = ()=>toast('Could not read that file');
+    reader.readAsText(file);
+    e.target.value='';
+  });
   c.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>orderModal(b.dataset.edit)));
   c.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',()=>{
     if(confirm('Delete this order?')){state.orders=state.orders.filter(o=>o.id!==b.dataset.del); toast('Order deleted'); renderAll();}
@@ -787,7 +940,7 @@ function renderOrders(c){
 }
 function orderModal(id){
   const editing = id ? state.orders.find(o=>o.id===id) : null;
-  const o = editing || {date:new Date().toISOString().slice(0,10), orderId:nextOrderId(), customer:'', productId:state.products[0]?.id||'', qty:1, discount:0, shipping:0, paymentMode:'COD', advance:state.assumptions.defaultAdvance, courierCost:0, status:'In Transit'};
+  const o = editing || {date:new Date().toISOString().slice(0,10), orderId:nextOrderId(), customer:'', productId:state.products[0]?.id||'', qty:1, discount:0, shipping:0, paymentMode:'COD', advance:state.assumptions.defaultAdvance, courierCost:0, status:'Unfulfilled'};
   const productOpts = state.products.filter(p=>p.name).map(p=>`<option value="${p.id}" ${p.id===o.productId?'selected':''}>${p.name}</option>`).join('');
   openModal(`
     <h3>${editing?'Edit order':'Add order'}</h3>
@@ -807,7 +960,7 @@ function orderModal(id){
       <div class="field"><label>Advance collected (₹)</label><input type="number" id="f_advance" value="${o.advance}" ${o.paymentMode==='Prepaid'?'disabled':''}></div>
       <div class="field"><label>Courier cost paid (₹)</label><input type="number" id="f_courier" value="${o.courierCost}"></div>
       <div class="field"><label>Order status</label><select id="f_status">
-        ${['In Transit','Delivered','RTO','Returned','Cancelled'].map(s=>`<option value="${s}" ${o.status===s?'selected':''}>${s}</option>`).join('')}
+        ${['Unfulfilled','In Transit','Delivered','RTO','Returned','Cancelled'].map(s=>`<option value="${s}" ${o.status===s?'selected':''}>${s}</option>`).join('')}
       </select></div>
     </div>
     <div class="modal-actions">
