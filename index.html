@@ -241,6 +241,7 @@ const ICON = {
   inventory:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="18" height="14" rx="1.5"/><path d="M3 7l2-4h14l2 4"/><path d="M9 11h6"/></svg>',
   bank:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 10l9-6 9 6"/><path d="M5 10v9M10 10v9M14 10v9M19 10v9"/><path d="M3 21h18"/></svg>',
   expenses:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M6 7h9a3 3 0 0 1 0 6H9a3 3 0 0 0 0 6h9"/></svg>',
+  adspend:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 11v2a1 1 0 0 0 1 1h3l5 4V6L7 10H4a1 1 0 0 0-1 1z"/><path d="M15.5 8.5a4 4 0 0 1 0 7"/><path d="M18.5 5.5a8 8 0 0 1 0 13"/></svg>',
   settings:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15 1.65 1.65 0 0 0 3.17 14H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.36.4.66.73.85.24.14.5.23.78.24H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
 };
 
@@ -286,7 +287,12 @@ function seedState(){
     {id:uid(),date:'2026-06-10',month:'Jun-2026',category:'Packaging Bulk Purchase',amount:0,notes:'Moved to Inventory & Stock sheet'},
     {id:uid(),date:'2026-06-15',month:'Jun-2026',category:'Software/Subscriptions',amount:1999,notes:'Shopify plan'}
   ];
-  return {products,orders,inventory,bank,expenses,assumptions};
+  const adSpend = [
+    {id:uid(),date:'2026-06-02',amount:250,notes:'Meta ads — clay kit launch'},
+    {id:uid(),date:'2026-06-04',amount:180,notes:'Meta ads — floral kit'},
+    {id:uid(),date:'2026-06-06',amount:220,notes:'Meta ads — ear covers'}
+  ];
+  return {products,orders,inventory,bank,expenses,adSpend,assumptions};
 }
 
 let state = seedState();
@@ -297,6 +303,7 @@ let activeTab = 'dashboard';
    Settings never silently change already-recorded profit numbers. ================= */
 function migrateOrderSnapshots(){
   let changed = false;
+  if(!Array.isArray(state.adSpend)){ state.adSpend = []; changed = true; }
   state.orders.forEach(o=>{
     if(o.priceSnap===undefined){
       const p = getProduct(o.productId) || {};
@@ -391,6 +398,7 @@ function dashboardRows(){
   const months = new Set();
   state.orders.forEach(o=>{const m=monthOf(o.date); if(m) months.add(m);});
   state.expenses.forEach(e=>{if(e.month) months.add(e.month);});
+  state.adSpend.forEach(a=>{const m=monthOf(a.date); if(m) months.add(m);});
   const sorted=[...months].sort((a,b)=>monthKey(a)-monthKey(b));
   const rows = sorted.map(m=>{
     const ords = state.orders.filter(o=>monthOf(o.date)===m).map(computeOrder);
@@ -409,9 +417,65 @@ function dashboardRows(){
     const otherExpenses = totalExpenses-marketing;
     const netProfit = grossProfit-totalExpenses;
     const netMargin = netRevenue===0?0:netProfit/netRevenue;
-    return {month:m,total,delivered,rto,cancelled,rtoRate,grossSales,netRevenue,totalCOGS,grossProfit,marketing,otherExpenses,totalExpenses,netProfit,netMargin,orders:ords,expensesList:exps};
+    const adEntries = state.adSpend.filter(a=>monthOf(a.date)===m);
+    const adSpendTotal = sum(adEntries.map(a=>a.amount));
+    const netProfitAfterAds = netProfit-adSpendTotal;
+    const netMarginAfterAds = netRevenue===0?0:netProfitAfterAds/netRevenue;
+    return {month:m,total,delivered,rto,cancelled,rtoRate,grossSales,netRevenue,totalCOGS,grossProfit,marketing,otherExpenses,totalExpenses,netProfit,netMargin,adSpendTotal,netProfitAfterAds,netMarginAfterAds,orders:ords,expensesList:exps,adEntries};
   });
   return rows;
+}
+
+/* ================= DASHBOARD PERIOD FILTER =================
+   Resolves a filter selection to a concrete {start,end} ISO date range
+   (null/null means "All time" — no filtering). */
+function monthKeyFromISO(dateStr){
+  const [y,m] = dateStr.split('-');
+  return Number(y)*12 + (Number(m)-1);
+}
+function getPeriodRange(type, customStart, customEnd, customMonth){
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth();
+  const pad = n=>String(n).padStart(2,'0');
+  const lastDayOf = (yr,mo)=> new Date(yr, mo+1, 0).getDate();
+  if(type==='thisMonth'){
+    return {start:`${y}-${pad(m+1)}-01`, end:`${y}-${pad(m+1)}-${pad(lastDayOf(y,m))}`, label:'This month'};
+  }
+  if(type==='lastMonth'){
+    let ly=y, lm=m-1; if(lm<0){lm=11; ly=y-1;}
+    return {start:`${ly}-${pad(lm+1)}-01`, end:`${ly}-${pad(lm+1)}-${pad(lastDayOf(ly,lm))}`, label:'Last month'};
+  }
+  if(type==='month' && customMonth){
+    const [mon,yr] = customMonth.split('-');
+    const mIdx = MONTHS.indexOf(mon);
+    return {start:`${yr}-${pad(mIdx+1)}-01`, end:`${yr}-${pad(mIdx+1)}-${pad(lastDayOf(Number(yr),mIdx))}`, label:customMonth};
+  }
+  if(type==='custom' && customStart && customEnd){
+    return {start:customStart, end:customEnd, label:`${customStart} to ${customEnd}`};
+  }
+  return {start:null, end:null, label:'All time'};
+}
+function computeTotalsForRange(start,end){
+  const inRange = d => !start || (d && d>=start && d<=end);
+  const ords = state.orders.filter(o=>inRange(o.date)).map(computeOrder);
+  const exps = state.expenses.filter(e=>inRange(e.date));
+  const ads = state.adSpend.filter(a=>inRange(a.date));
+  const delivered = ords.filter(o=>o.status==='Delivered').length;
+  const rto = ords.filter(o=>o.status==='RTO'||o.status==='Returned').length;
+  const cancelled = ords.filter(o=>o.status==='Cancelled').length;
+  const total = ords.length;
+  const rtoRate = (delivered+rto)===0?0:rto/(delivered+rto);
+  const grossSales = sum(ords.map(o=>o.grossSale));
+  const netRevenue = sum(ords.map(o=>o.netRevenue));
+  const totalCOGS = sum(ords.map(o=>o.totalCOGS));
+  const grossProfit = sum(ords.map(o=>o.grossProfit));
+  const totalExpenses = sum(exps.map(e=>e.amount));
+  const netProfit = grossProfit-totalExpenses;
+  const adSpendTotal = sum(ads.map(a=>a.amount));
+  const netProfitAfterAds = netProfit-adSpendTotal;
+  const netMargin = netRevenue===0?0:netProfit/netRevenue;
+  const netMarginAfterAds = netRevenue===0?0:netProfitAfterAds/netRevenue;
+  return {total,delivered,rto,cancelled,rtoRate,grossSales,netRevenue,totalCOGS,grossProfit,totalExpenses,netProfit,adSpendTotal,netProfitAfterAds,netMargin,netMarginAfterAds};
 }
 
 function productPerformanceRows(){
@@ -459,6 +523,7 @@ const TABS = [
   {key:'inventory', label:'Inventory & Stock'},
   {key:'bank', label:'Bank Account'},
   {key:'expenses', label:'Expenses'},
+  {key:'adspend', label:'Ad Spend'},
   {key:'settings', label:'Settings'}
 ];
 function renderNav(){
@@ -481,7 +546,7 @@ function renderAll(){
   const renderers = {
     dashboard: renderDashboard, orders: renderOrders, products: renderProducts,
     performance: renderPerformance, inventory: renderInventory, bank: renderBank,
-    expenses: renderExpenses, settings: renderSettings
+    expenses: renderExpenses, adspend: renderAdSpend, settings: renderSettings
   };
   renderers[activeTab](c);
 }
@@ -501,36 +566,69 @@ function animateBalance(){
 
 /* ================= DASHBOARD ================= */
 let chartRef=null;
+let dashboardFilter = {type:'all', start:'', end:'', month:''};
 function renderDashboard(c){
-  const rows = dashboardRows();
+  const allRows = dashboardRows();
+  const availableMonths = allRows.map(r=>r.month);
+  const range = getPeriodRange(dashboardFilter.type, dashboardFilter.start, dashboardFilter.end, dashboardFilter.month || availableMonths[availableMonths.length-1] || '');
+  const ft = computeTotalsForRange(range.start, range.end);
+
+  // monthly table/chart: show only months that fall inside the selected range (All time = everything)
+  const rows = range.start ? allRows.filter(r=>{
+    const mk = monthKey(r.month);
+    return mk>=monthKeyFromISO(range.start) && mk<=monthKeyFromISO(range.end);
+  }) : allRows;
   const totals = rows.reduce((a,r)=>({
     total:a.total+r.total, delivered:a.delivered+r.delivered, rto:a.rto+r.rto, cancelled:a.cancelled+r.cancelled,
     grossSales:a.grossSales+r.grossSales, netRevenue:a.netRevenue+r.netRevenue, totalCOGS:a.totalCOGS+r.totalCOGS,
     grossProfit:a.grossProfit+r.grossProfit, marketing:a.marketing+r.marketing, otherExpenses:a.otherExpenses+r.otherExpenses,
-    totalExpenses:a.totalExpenses+r.totalExpenses, netProfit:a.netProfit+r.netProfit
-  }), {total:0,delivered:0,rto:0,cancelled:0,grossSales:0,netRevenue:0,totalCOGS:0,grossProfit:0,marketing:0,otherExpenses:0,totalExpenses:0,netProfit:0});
+    totalExpenses:a.totalExpenses+r.totalExpenses, netProfit:a.netProfit+r.netProfit, adSpendTotal:a.adSpendTotal+r.adSpendTotal, netProfitAfterAds:a.netProfitAfterAds+r.netProfitAfterAds
+  }), {total:0,delivered:0,rto:0,cancelled:0,grossSales:0,netRevenue:0,totalCOGS:0,grossProfit:0,marketing:0,otherExpenses:0,totalExpenses:0,netProfit:0,adSpendTotal:0,netProfitAfterAds:0});
   const totalRtoRate = (totals.delivered+totals.rto)===0?0:totals.rto/(totals.delivered+totals.rto);
   const totalMargin = totals.netRevenue===0?0:totals.netProfit/totals.netRevenue;
+  const totalMarginAfterAds = totals.netRevenue===0?0:totals.netProfitAfterAds/totals.netRevenue;
+
+  const monthOpts = availableMonths.slice().reverse().map(m=>`<option value="${m}" ${dashboardFilter.month===m?'selected':''}>${m}</option>`).join('');
 
   c.innerHTML = `
     <div class="section-head">
-      <div><h2>Profit &amp; Loss Dashboard</h2><p>Auto-calculated from Orders, Expenses and your Bank ledger. Nothing to type here.</p></div>
+      <div><h2>Profit &amp; Loss Dashboard</h2><p>Auto-calculated from Orders, Expenses, Ad Spend and your Bank ledger. Nothing to type here.</p></div>
       <button class="btn primary" id="btnMonthlyReport">⬇ Download Monthly Report (PDF)</button>
+    </div>
+    <div class="card" style="margin-bottom:18px;">
+      <div class="form-grid" style="align-items:end;">
+        <div class="field"><label>Time period</label>
+          <select id="df_type">
+            <option value="all" ${dashboardFilter.type==='all'?'selected':''}>All time</option>
+            <option value="thisMonth" ${dashboardFilter.type==='thisMonth'?'selected':''}>This month</option>
+            <option value="lastMonth" ${dashboardFilter.type==='lastMonth'?'selected':''}>Last month</option>
+            <option value="month" ${dashboardFilter.type==='month'?'selected':''}>Specific month</option>
+            <option value="custom" ${dashboardFilter.type==='custom'?'selected':''}>Custom date range</option>
+          </select>
+        </div>
+        ${dashboardFilter.type==='month' ? `<div class="field"><label>Month</label><select id="df_month">${monthOpts}</select></div>` : ''}
+        ${dashboardFilter.type==='custom' ? `
+          <div class="field"><label>From</label><input type="date" id="df_start" value="${dashboardFilter.start||''}"></div>
+          <div class="field"><label>To</label><input type="date" id="df_end" value="${dashboardFilter.end||''}"></div>
+        ` : ''}
+      </div>
+      <div class="hint">Showing: <b>${range.start ? range.label+' ('+range.start+' to '+range.end+')' : 'All time'}</b> — live bank balance below is always your real current balance, not filtered by period.</div>
     </div>
     <div class="grid-kpi">
       <div class="kpi"><div class="lbl">Live bank balance</div><div class="val">${fmt(liveBalance())}</div></div>
-      <div class="kpi ${totals.netProfit>=0?'pos':'neg'}"><div class="lbl">Net profit (all-time)</div><div class="val">${fmt(totals.netProfit)}</div><div class="sub">${pct(totalMargin)} margin</div></div>
-      <div class="kpi"><div class="lbl">Net revenue</div><div class="val">${fmt(totals.netRevenue)}</div></div>
-      <div class="kpi ${totalRtoRate>0.25?'neg':''}"><div class="lbl">RTO rate</div><div class="val">${pct(totalRtoRate)}</div><div class="sub">${totals.rto} of ${totals.delivered+totals.rto} resolved orders</div></div>
+      <div class="kpi ${ft.netProfit>=0?'pos':'neg'}"><div class="lbl">Net profit</div><div class="val">${fmt(ft.netProfit)}</div><div class="sub">${pct(ft.netMargin)} margin · before ads</div></div>
+      <div class="kpi ${ft.netProfitAfterAds>=0?'pos':'neg'}"><div class="lbl">Net profit after ads</div><div class="val">${fmt(ft.netProfitAfterAds)}</div><div class="sub">${fmt(ft.adSpendTotal)} ad spend this period</div></div>
+      <div class="kpi"><div class="lbl">Net revenue</div><div class="val">${fmt(ft.netRevenue)}</div></div>
+      <div class="kpi ${ft.rtoRate>0.25?'neg':''}"><div class="lbl">RTO rate</div><div class="val">${pct(ft.rtoRate)}</div><div class="sub">${ft.rto} of ${ft.delivered+ft.rto} resolved orders</div></div>
     </div>
-    <div class="chart-card"><h3>Net revenue vs. net profit, by month</h3><canvas id="dashChart" height="90"></canvas></div>
+    <div class="chart-card"><h3>Net revenue vs. net profit vs. net profit after ads, by month</h3><canvas id="dashChart" height="90"></canvas></div>
     <div class="section-head"><div><h2 style="font-size:17px;">Monthly P&amp;L</h2></div></div>
     <div class="table-wrap"><table>
       <thead><tr>
         <th>Month</th><th class="num">Orders</th><th class="num">Delivered</th><th class="num">RTO/Ret.</th><th class="num">Cancelled</th>
         <th class="num">RTO %</th><th class="num">Gross Sales</th><th class="num">Net Revenue</th><th class="num">COGS</th>
         <th class="num">Gross Profit</th><th class="num">Marketing</th><th class="num">Other Exp.</th><th class="num">Total Exp.</th>
-        <th class="num">Net Profit</th><th class="num">Margin</th>
+        <th class="num">Net Profit</th><th class="num">Ad Spend</th><th class="num">Net Profit After Ads</th><th class="num">Margin</th>
       </tr></thead>
       <tbody>
         ${rows.length? rows.map(r=>`
@@ -538,18 +636,31 @@ function renderDashboard(c){
             <td>${r.month}</td><td class="num">${r.total}</td><td class="num">${r.delivered}</td><td class="num">${r.rto}</td><td class="num">${r.cancelled}</td>
             <td class="num">${pct(r.rtoRate)}</td><td class="num">${fmt(r.grossSales)}</td><td class="num">${fmt(r.netRevenue)}</td><td class="num">${fmt(r.totalCOGS)}</td>
             <td class="num">${fmt(r.grossProfit)}</td><td class="num">${fmt(r.marketing)}</td><td class="num">${fmt(r.otherExpenses)}</td><td class="num">${fmt(r.totalExpenses)}</td>
-            <td class="num" style="color:${r.netProfit>=0?'var(--sage)':'var(--rose)'};font-weight:600;">${fmt(r.netProfit)}</td><td class="num">${pct(r.netMargin)}</td>
-          </tr>`).join('') : `<tr><td colspan="15" class="empty">No orders or expenses logged yet — add one on the Orders tab to see your P&amp;L appear here.</td></tr>`}
+            <td class="num">${fmt(r.netProfit)}</td><td class="num">${fmt(r.adSpendTotal)}</td>
+            <td class="num" style="color:${r.netProfitAfterAds>=0?'var(--sage)':'var(--rose)'};font-weight:600;">${fmt(r.netProfitAfterAds)}</td><td class="num">${pct(r.netMargin)}</td>
+          </tr>`).join('') : `<tr><td colspan="17" class="empty">No orders or expenses logged yet — add one on the Orders tab to see your P&amp;L appear here.</td></tr>`}
         ${rows.length? `<tr class="total-row">
             <td>TOTAL</td><td class="num">${totals.total}</td><td class="num">${totals.delivered}</td><td class="num">${totals.rto}</td><td class="num">${totals.cancelled}</td>
             <td class="num">${pct(totalRtoRate)}</td><td class="num">${fmt(totals.grossSales)}</td><td class="num">${fmt(totals.netRevenue)}</td><td class="num">${fmt(totals.totalCOGS)}</td>
             <td class="num">${fmt(totals.grossProfit)}</td><td class="num">${fmt(totals.marketing)}</td><td class="num">${fmt(totals.otherExpenses)}</td><td class="num">${fmt(totals.totalExpenses)}</td>
-            <td class="num">${fmt(totals.netProfit)}</td><td class="num">${pct(totalMargin)}</td>
+            <td class="num">${fmt(totals.netProfit)}</td><td class="num">${fmt(totals.adSpendTotal)}</td><td class="num">${fmt(totals.netProfitAfterAds)}</td><td class="num">${pct(totalMargin)}</td>
           </tr>` : ''}
       </tbody>
     </table></div>
   `;
-  document.getElementById('btnMonthlyReport').addEventListener('click',()=>monthlyReportModal(rows));
+  document.getElementById('btnMonthlyReport').addEventListener('click',()=>monthlyReportModal(allRows));
+  document.getElementById('df_type').addEventListener('change',e=>{
+    dashboardFilter.type = e.target.value;
+    if(dashboardFilter.type==='month' && !dashboardFilter.month) dashboardFilter.month = availableMonths[availableMonths.length-1]||'';
+    renderAll();
+  });
+  const dfMonth = document.getElementById('df_month');
+  if(dfMonth) dfMonth.addEventListener('change',e=>{ dashboardFilter.month = e.target.value; renderAll(); });
+  const dfStart = document.getElementById('df_start');
+  const dfEnd = document.getElementById('df_end');
+  if(dfStart) dfStart.addEventListener('change',e=>{ dashboardFilter.start = e.target.value; renderAll(); });
+  if(dfEnd) dfEnd.addEventListener('change',e=>{ dashboardFilter.end = e.target.value; renderAll(); });
+
   if(rows.length){
     const ctx = document.getElementById('dashChart');
     if(chartRef) chartRef.destroy();
@@ -557,7 +668,8 @@ function renderDashboard(c){
       type:'bar',
       data:{labels:rows.map(r=>r.month), datasets:[
         {label:'Net Revenue', data:rows.map(r=>r.netRevenue), backgroundColor:'#BD5B3455', borderColor:'#BD5B34', borderWidth:1.5, borderRadius:5},
-        {label:'Net Profit', data:rows.map(r=>r.netProfit), backgroundColor:'#5E7C5555', borderColor:'#5E7C55', borderWidth:1.5, borderRadius:5}
+        {label:'Net Profit', data:rows.map(r=>r.netProfit), backgroundColor:'#5E7C5555', borderColor:'#5E7C55', borderWidth:1.5, borderRadius:5},
+        {label:'Net Profit After Ads', data:rows.map(r=>r.netProfitAfterAds), backgroundColor:'#B8862E55', borderColor:'#B8862E', borderWidth:1.5, borderRadius:5}
       ]},
       options:{responsive:true, maintainAspectRatio:false,
         scales:{y:{ticks:{callback:v=>'₹'+v.toLocaleString('en-IN')}, grid:{color:'#E4D8C3'}}, x:{grid:{display:false}}},
@@ -630,7 +742,8 @@ function generateMonthlyPDF(row){
       ['Net revenue', 'Rs. '+row.netRevenue.toLocaleString('en-IN'), 'COGS', 'Rs. '+row.totalCOGS.toLocaleString('en-IN')],
       ['Gross profit', 'Rs. '+row.grossProfit.toLocaleString('en-IN'), 'Marketing spend', 'Rs. '+row.marketing.toLocaleString('en-IN')],
       ['Other expenses', 'Rs. '+row.otherExpenses.toLocaleString('en-IN'), 'Total expenses', 'Rs. '+row.totalExpenses.toLocaleString('en-IN')],
-      ['Net profit', 'Rs. '+row.netProfit.toLocaleString('en-IN'), 'Net margin', (row.netMargin*100).toFixed(1)+'%']
+      ['Net profit', 'Rs. '+row.netProfit.toLocaleString('en-IN'), 'Net margin', (row.netMargin*100).toFixed(1)+'%'],
+      ['Daily ad spend (Meta)', 'Rs. '+row.adSpendTotal.toLocaleString('en-IN'), 'Net profit after ads', 'Rs. '+row.netProfitAfterAds.toLocaleString('en-IN')]
     ];
     doc.autoTable({
       startY: y+6, margin:{left:marginL,right:40}, theme:'plain', styles:{fontSize:9.5, cellPadding:4, textColor:[40,30,25]},
@@ -1283,6 +1396,165 @@ function expModal(id){
   });
 }
 
+/* ================= AD SPEND (daily) ================= */
+function adSpendRows(){
+  return [...state.adSpend].sort((a,b)=>(a.date<b.date?1:-1));
+}
+function startOfWeekISO(d){
+  const day = d.getDay(); // 0=Sun..6=Sat
+  const diff = (day===0? -6 : 1-day); // shift back to Monday
+  const mon = new Date(d);
+  mon.setDate(d.getDate()+diff);
+  return mon.toISOString().slice(0,10);
+}
+function getAdPeriodRange(type){
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0,10);
+  if(type==='yesterday'){
+    const y = new Date(now); y.setDate(now.getDate()-1);
+    const ys = y.toISOString().slice(0,10);
+    return {start:ys, end:ys, label:'Yesterday'};
+  }
+  if(type==='thisWeek'){
+    return {start:startOfWeekISO(now), end:todayStr, label:'This week (Mon–today)'};
+  }
+  if(type==='thisMonth'){
+    const first = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10);
+    return {start:first, end:todayStr, label:'This month'};
+  }
+  return {start:null, end:null, label:'All time'};
+}
+function computeAdSummary(start,end){
+  const inRange = d => !start || (d && d>=start && d<=end);
+  const ords = state.orders.filter(o=>inRange(o.date)).map(computeOrder);
+  const ads = state.adSpend.filter(a=>inRange(a.date));
+  const totalOrders = ords.length;
+  const totalRevenue = sum(ords.map(o=>o.netRevenue));
+  const totalGrossProfit = sum(ords.map(o=>o.grossProfit));
+  const adSpendTotal = sum(ads.map(a=>a.amount));
+  const cpp = totalOrders>0 ? adSpendTotal/totalOrders : null;
+  const roas = adSpendTotal>0 ? totalRevenue/adSpendTotal : null;
+  const finalProfit = totalGrossProfit-adSpendTotal;
+  return {totalOrders,totalRevenue,totalGrossProfit,adSpendTotal,cpp,roas,finalProfit};
+}
+function dailyAdPerformanceRows(){
+  const dates = new Set();
+  state.orders.forEach(o=>{if(o.date) dates.add(o.date);});
+  state.adSpend.forEach(a=>{if(a.date) dates.add(a.date);});
+  const sorted = [...dates].sort((a,b)=>(a<b?1:-1));
+  return sorted.map(d=>{
+    const ords = state.orders.filter(o=>o.date===d).map(computeOrder);
+    const ads = state.adSpend.filter(a=>a.date===d);
+    const totalOrders = ords.length;
+    const totalRevenue = sum(ords.map(o=>o.netRevenue));
+    const totalGrossProfit = sum(ords.map(o=>o.grossProfit));
+    const adSpendTotal = sum(ads.map(a=>a.amount));
+    const cpp = totalOrders>0 ? adSpendTotal/totalOrders : null;
+    const roas = adSpendTotal>0 ? totalRevenue/adSpendTotal : null;
+    const finalProfit = totalGrossProfit-adSpendTotal;
+    return {date:d,totalOrders,totalRevenue,totalGrossProfit,adSpendTotal,cpp,roas,finalProfit};
+  });
+}
+let adSpendFilterType = 'thisMonth';
+function renderAdSpend(c){
+  const rows = adSpendRows();
+  const total = sum(state.adSpend.map(a=>a.amount));
+  const dailyRows = dailyAdPerformanceRows();
+  const range = getAdPeriodRange(adSpendFilterType);
+  const s = computeAdSummary(range.start, range.end);
+
+  c.innerHTML = `
+    <div class="section-head">
+      <div><h2>Daily Ad Spend (Meta Ads)</h2><p>Log what you spent on ads each day, and see orders, ROAS and profit against it — day by day.</p></div>
+      <button class="btn primary" id="addAd">+ Log ad spend</button>
+    </div>
+    <div class="callout sage">If you also add lump-sum marketing entries under Expenses → Marketing/Ads, keep the two separate so you don't double-count — day-to-day Meta spend belongs here, one-off costs (agency fee, design work) belong in Expenses.</div>
+
+    <div class="card" style="margin-bottom:18px;">
+      <div class="section-head" style="margin-bottom:10px;">
+        <div><h3 style="font-family:var(--font-display);font-size:16px;margin:0;">Summary</h3></div>
+        <div class="field" style="min-width:180px;">
+          <select id="ad_filter">
+            <option value="yesterday" ${adSpendFilterType==='yesterday'?'selected':''}>Yesterday</option>
+            <option value="thisWeek" ${adSpendFilterType==='thisWeek'?'selected':''}>This week</option>
+            <option value="thisMonth" ${adSpendFilterType==='thisMonth'?'selected':''}>This month</option>
+            <option value="all" ${adSpendFilterType==='all'?'selected':''}>All time</option>
+          </select>
+        </div>
+      </div>
+      <div class="hint" style="margin:0 0 12px;">Showing: <b>${range.label}</b>${range.start?` (${range.start} to ${range.end})`:''}</div>
+      <div class="grid-kpi" style="margin-bottom:0;">
+        <div class="kpi"><div class="lbl">Total orders</div><div class="val">${s.totalOrders}</div></div>
+        <div class="kpi"><div class="lbl">Cost per purchase</div><div class="val">${s.cpp===null?'—':fmt(s.cpp)}</div></div>
+        <div class="kpi"><div class="lbl">ROAS</div><div class="val">${s.roas===null?'—':s.roas.toFixed(2)+'x'}</div></div>
+        <div class="kpi"><div class="lbl">Total revenue</div><div class="val">${fmt(s.totalRevenue)}</div></div>
+        <div class="kpi"><div class="lbl">Total gross profit</div><div class="val">${fmt(s.totalGrossProfit)}</div></div>
+        <div class="kpi"><div class="lbl">Ad spend</div><div class="val">${fmt(s.adSpendTotal)}</div></div>
+        <div class="kpi ${s.finalProfit>=0?'pos':'neg'}"><div class="lbl">Final profit</div><div class="val">${fmt(s.finalProfit)}</div><div class="sub">gross profit − ad spend</div></div>
+      </div>
+    </div>
+
+    <div class="section-head"><div><h2 style="font-size:17px;">Day-by-day performance</h2><p>Auto-calculated — one row per day that has an order or ad spend logged. "Final profit" is gross profit minus that day's ad spend (before other monthly expenses).</p></div></div>
+    <div class="table-wrap" style="margin-bottom:24px;"><table>
+      <thead><tr>
+        <th>Date</th><th class="num">Orders</th><th class="num">Revenue</th><th class="num">Gross Profit</th>
+        <th class="num">Ad Spend</th><th class="num">Cost/Purchase</th><th class="num">ROAS</th><th class="num">Final Profit</th>
+      </tr></thead>
+      <tbody>
+        ${dailyRows.length? dailyRows.map(r=>`
+          <tr>
+            <td>${r.date}</td><td class="num">${r.totalOrders}</td><td class="num">${fmt(r.totalRevenue)}</td><td class="num">${fmt(r.totalGrossProfit)}</td>
+            <td class="num">${fmt(r.adSpendTotal)}</td><td class="num">${r.cpp===null?'—':fmt(r.cpp)}</td><td class="num">${r.roas===null?'—':r.roas.toFixed(2)+'x'}</td>
+            <td class="num" style="color:${r.finalProfit>=0?'var(--sage)':'var(--rose)'};font-weight:600;">${fmt(r.finalProfit)}</td>
+          </tr>`).join('') : `<tr><td colspan="8" class="empty">No orders or ad spend logged yet.</td></tr>`}
+      </tbody>
+    </table></div>
+
+    <div class="section-head"><div><h2 style="font-size:17px;">Ad spend log</h2><p>Individual entries — edit or delete here.</p></div></div>
+    <div class="grid-kpi"><div class="kpi"><div class="lbl">Total logged (all-time)</div><div class="val">${fmt(total)}</div></div></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Date</th><th class="num">Amount</th><th>Notes / Campaign</th><th></th></tr></thead>
+      <tbody>
+        ${rows.length? rows.map(a=>`
+          <tr>
+            <td>${a.date}</td><td class="num">${fmt(a.amount)}</td><td>${a.notes||''}</td>
+            <td><div class="row-actions">
+              <button class="icon-btn" data-edit="${a.id}">${iconPencil()}</button>
+              <button class="icon-btn" data-del="${a.id}">${iconTrash()}</button>
+            </div></td>
+          </tr>`).join('') : `<tr><td colspan="4" class="empty">No ad spend logged yet — add today's Meta ads spend to start tracking Net Profit After Ads.</td></tr>`}
+      </tbody>
+    </table></div>
+  `;
+  c.querySelector('#addAd').addEventListener('click',()=>adSpendModal());
+  c.querySelector('#ad_filter').addEventListener('change',e=>{ adSpendFilterType = e.target.value; renderAll(); });
+  c.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>adSpendModal(b.dataset.edit)));
+  c.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',()=>{
+    if(confirm('Delete this ad spend entry?')){state.adSpend=state.adSpend.filter(a=>a.id!==b.dataset.del); toast('Deleted'); renderAll();}
+  }));
+}
+function adSpendModal(id){
+  const editing = id?state.adSpend.find(a=>a.id===id):null;
+  const a = editing || {date:new Date().toISOString().slice(0,10), amount:0, notes:''};
+  openModal(`
+    <h3>${editing?'Edit ad spend':'Log ad spend'}</h3>
+    <div class="modal-sub">Enter what you spent on Meta ads for this specific day.</div>
+    <div class="form-grid">
+      <div class="field"><label>Date</label><input type="date" id="f_date" value="${a.date}"></div>
+      <div class="field"><label>Amount spent (₹)</label><input type="number" id="f_amount" value="${a.amount}"></div>
+      <div class="field full"><label>Notes / campaign (optional)</label><input type="text" id="f_notes" value="${a.notes||''}"></div>
+    </div>
+    <div class="modal-actions"><button class="btn ghost" id="mCancel">Cancel</button><button class="btn primary" id="mSave">${editing?'Save changes':'Add entry'}</button></div>
+  `);
+  document.getElementById('mCancel').addEventListener('click',closeModal);
+  document.getElementById('mSave').addEventListener('click',()=>{
+    const rec = {id:editing?editing.id:uid(), date:document.getElementById('f_date').value, amount:Number(document.getElementById('f_amount').value)||0, notes:document.getElementById('f_notes').value};
+    if(editing){state.adSpend=state.adSpend.map(a=>a.id===editing.id?rec:a); toast('Updated');}
+    else {state.adSpend.push(rec); toast('Ad spend logged');}
+    closeModal(); renderAll();
+  });
+}
+
 /* ================= SETTINGS ================= */
 function renderSettings(c){
   const a = state.assumptions;
@@ -1352,7 +1624,7 @@ function renderSettings(c){
   });
   document.getElementById('a_clear').addEventListener('click',()=>{
     if(confirm('This clears every product, order, purchase, bank entry and expense. Continue?')){
-      state = {products:[],orders:[],inventory:[],bank:{opening:0,entries:[]},expenses:[],assumptions:state.assumptions};
+      state = {products:[],orders:[],inventory:[],bank:{opening:0,entries:[]},expenses:[],adSpend:[],assumptions:state.assumptions};
       toast('All data cleared'); renderAll();
     }
   });
