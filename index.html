@@ -1963,6 +1963,76 @@ computeOrder=function(o){
 };
 window.courierSync={makePlan,apply,stats};
 })();
+  /* ================= PATCH 2 — gateway fees, courier COD/RTO fees, Partial COD tab =================
+   Paste this block just ABOVE  boot();  (after the Delivery Partner block). */
+(function(){
+const key=o=>String(o.orderId||'').replace(/^#/,'').trim().toLowerCase();
+
+/* 1. Courier policy (one-time): ShipPrime couriers charge NO COD fee and NO extra RTO freight.
+      Sets COD fee 0% and RTO multiplier 1x in Settings AND on every saved order, so RTO cost = the forward freight already paid. */
+const _mig=migrateOrderSnapshots;
+migrateOrderSnapshots=function(){
+  const ch=_mig(), A=state.assumptions;
+  if(A.codGatewayPct==null) A.codGatewayPct=1.5;
+  if(!state.feePolicy2){
+    A.codFeePct=0; A.rtoMultiplier=1;
+    state.orders.forEach(o=>{o.codFeePctSnap=0; o.rtoMultiplierSnap=1;});
+    state.feePolicy2=true; return true;
+  }
+  return ch;
+};
+
+/* 2. Gateway fee (Shiprocket checkout / PayU): prepaid = 2% + GST on full amount (already how the tracker works);
+      partial-COD = 1.5% + GST on the FULL order value, not just the advance. */
+const _co2=computeOrder;
+computeOrder=function(o){
+  const r=_co2(o);
+  if(o.paymentMode==='COD'){
+    const A=state.assumptions, gst=(Number(o.gstPctSnap ?? A.gstPct)||0)/100;
+    const fee=r.netRevenue*((Number(A.codGatewayPct ?? 1.5)||0)/100)*(1+gst), d=fee-r.gatewayFee;
+    r.gatewayFee=fee; if(o.status!=='Cancelled') r.grossProfit-=d;
+  }
+  return r;
+};
+const _rs=renderSettings;
+renderSettings=function(c){
+  _rs(c); const g=c.querySelector('.assump-grid'); if(!g) return;
+  g.insertAdjacentHTML('beforeend',`<div class="field"><label>Gateway fee % on FULL value of partial-COD orders (+GST)</label><input type="number" step="0.01" id="a_codgw" value="${state.assumptions.codGatewayPct ?? 1.5}"></div>`);
+  const inp=c.querySelector('#a_codgw');
+  c.querySelector('#a_save').addEventListener('click',()=>{state.assumptions.codGatewayPct=Number(inp.value)||0; renderAll();});
+};
+
+/* 3. Partial COD list moves out of Orders into its own main-menu tab */
+const _ro=renderOrders;
+renderOrders=function(c){
+  _ro(c); const s=c.querySelector('.stitch');
+  if(s){while(s.nextElementSibling) s.nextElementSibling.remove(); s.remove();}
+};
+function renderPartial(c){
+  const rows=state.orders.map(computeOrder).filter(o=>o.paymentMode==='COD'&&(o.status==='In Transit'||o.status==='Unfulfilled')).sort((a,b)=>(a.date<b.date?1:-1));
+  const cr=(state.courier&&state.courier.byOrder)||{}, tr=rows.filter(o=>o.status==='In Transit').length;
+  c.innerHTML=`
+    <div class="section-head"><div><h2>Partial COD Orders</h2><p>COD orders with an advance collected that are still Unfulfilled or In Transit. They drop off automatically once marked Delivered, Cancelled, RTO or Returned — including by a Delivery Partner sync.</p></div></div>
+    <div class="grid-kpi">
+      <div class="kpi"><div class="lbl">Open orders</div><div class="val">${rows.length}</div><div class="sub">${tr} in transit · ${rows.length-tr} unfulfilled</div></div>
+      <div class="kpi"><div class="lbl">COD balance to collect</div><div class="val">${fmt(sum(rows.map(o=>o.balanceDue)))}</div></div>
+      <div class="kpi"><div class="lbl">Advance already received</div><div class="val">${fmt(sum(rows.map(o=>o.advance)))}</div></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Date</th><th>Order ID</th><th>Customer</th><th>Product</th><th class="num">Qty</th><th class="num">Net Revenue</th><th class="num">Advance</th><th class="num">Balance Due</th><th>Courier</th><th>AWB</th><th class="num">Freight</th><th>Status</th><th class="num">Gross Profit</th><th></th></tr></thead><tbody>
+    ${rows.length?rows.map(o=>{const x=cr[key(o)]||{};return `<tr><td>${o.date||'—'}</td><td>${o.orderId}</td><td>${o.customer||'—'}</td><td>${o.productName}</td><td class="num">${o.qty}</td><td class="num">${fmt(o.netRevenue)}</td><td class="num">${fmt(o.advance)}</td><td class="num">${fmt(o.balanceDue)}</td><td>${x.tpl||'—'}</td><td>${x.awb||'—'}</td><td class="num">${fmt(o.courierEff)}</td><td>${statusBadge(o.status)}</td><td class="num" style="color:${gpColor(o)};font-weight:600;">${fmt(o.grossProfit)}</td>
+      <td><div class="row-actions"><button class="icon-btn" data-edit="${o.id}" title="Edit">${iconPencil()}</button><button class="icon-btn" data-del="${o.id}" title="Delete">${iconTrash()}</button></div></td></tr>`;}).join(''):`<tr><td colspan="14" class="empty">No partial COD orders open right now.</td></tr>`}</tbody></table></div>`;
+  c.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click',()=>orderModal(b.dataset.edit)));
+  c.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',()=>{
+    if(confirm('Delete this order?')){state.orders=state.orders.filter(o=>o.id!==b.dataset.del); toast('Order deleted'); renderAll();}}));
+}
+TABS.splice(2,0,{key:'partial',label:'Partial COD Orders'});
+ICON.partial='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
+const _ra2=renderAll;
+renderAll=function(){
+  if(activeTab!=='partial') return _ra2();
+  persist(); renderNav(); document.getElementById('topTitle').textContent='Partial COD Orders'; animateBalance();
+  const c=document.getElementById('content'); c.innerHTML=''; renderPartial(c);
+};
+})();
   boot();
 </script>
 </body>
