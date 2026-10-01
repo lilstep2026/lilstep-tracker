@@ -1769,7 +1769,201 @@ document.getElementById('fileImport').addEventListener('change',e=>{
 });
 
 /* ================= INIT ================= */
-boot();
+/* ================= DELIVERY PARTNER SYNC (ShipPrime Master + Daily charges) =================
+   Paste this whole block just ABOVE the line:  boot();   (the last line of the script).
+   Master report  -> final order status, courier (TPL), AWB, dates, state, OFD attempts
+   Daily report   -> freight debited per order (+ COD credits) -> fills "Courier" cost on the order
+   Match rule: Order ID (#1384) must match AND customer name must match; otherwise it goes to "Needs review". */
+(function(){
+const MAP={DELIVERED:'Delivered',RTO:'RTO',CANCELLED:'Cancelled',SHIPPED:'In Transit',OUT_FOR_DELIVERY:'In Transit',PACKED:'Unfulfilled',CONFIRMED:'Unfulfilled',PENDING:'Unfulfilled',LABEL_GENERATED_ERRORED:'Unfulfilled'};
+const FINAL=['Delivered','RTO','Returned','Cancelled'];
+const nid=s=>String(s||'').replace(/^#/,'').trim().toLowerCase();
+const toks=s=>String(s||'').toLowerCase().replace(/[^\p{L}\p{N} ]/gu,' ').split(/\s+/).filter(t=>t.length>1);
+const nameOK=(a,b)=>{const x=toks(a),y=toks(b);return x.some(t=>y.includes(t));};
+const num=v=>Number(String(v==null?'':v).replace(/[^\d.\-]/g,''))||0;
+const isRtoEv=e=>/rto|return/i.test(e||'');
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const pd=s=>{ if(!s) return null; s=String(s).trim(); const m=s.match(/^(\d{2})-(\d{2})-(\d{4})[ T](.*)$/);
+  const d=new Date(m?`${m[3]}-${m[2]}-${m[1]}T${m[4]}`:s.replace(' ','T')); return isNaN(d)?null:d; };
+const C=()=>state.courier||(state.courier={byOrder:{},uploads:[]});
+const newStatus=(cur,ms)=>{const t=MAP[ms]; if(!t) return cur; if(FINAL.includes(cur)&&!FINAL.includes(t)) return cur; return t;};
+const totals=rec=>{let fwd=0,rto=0,cr=0;Object.values(rec.charges||{}).forEach(x=>{
+  if(x.type==='CREDIT') cr+=x.amt; else if(isRtoEv(x.ev)) rto+=x.amt; else fwd+=x.amt;});return {fwd,rto,cr};};
+
+/* ---------- read + classify files ---------- */
+function readFiles(files){
+  return Promise.all([...files].map(f=>new Promise(res=>{
+    const r=new FileReader();
+    r.onload=e=>{const p=Papa.parse(e.target.result,{header:true,skipEmptyLines:true}); const h=p.meta.fields||[];
+      res({name:f.name,rows:p.data,type:h.includes('Payment Event name')?'daily':(h.includes('TPL Vendor')&&h.includes('Order Name'))?'master':null});};
+    r.onerror=()=>res({name:f.name,rows:[],type:null}); r.readAsText(f);})));
+}
+
+/* ---------- build a plan (no changes yet) ---------- */
+function makePlan(parsed){
+  const groups={}; state.orders.forEach(o=>{const k=nid(o.orderId);(groups[k]=groups[k]||[]).push(o);});
+  const items={}; let payout=null;
+  const item=k=>items[k]||(items[k]={k,rows:groups[k]||[],names:new Set(),m:null,d:[]});
+  parsed.forEach(f=>{
+    if(f.type==='master') f.rows.forEach(r=>{const k=nid(r['Order Name']); if(!k) return; const it=item(k);
+      it.names.add((r['User Name']||'').trim());
+      it.m={tpl:(r['TPL Vendor']||'').trim(),awb:r['AWB Number']||'',ms:(r['Order Status']||'').trim(),mode:r['Payment Mode']||'',
+        state:r['User State']||'',amount:num(r['Total Amount']),created:r['Order Created At']||'',picked:r['Picked Up Timestamp']||'',
+        deliv:r['Delivered Timestamp']||'',rtoAt:r['RTO Delivered Timestamp']||'',ofd:[r['OFD1'],r['OFD2'],r['OFD3']].filter(Boolean).length};});
+    if(f.type==='daily') f.rows.forEach(r=>{
+      if(r['Order id']==='Base Payout Amount'){payout=num(r['Order name']);return;}
+      if(!r['Payment Event name']) return; const k=nid(r['Order name']); if(!k) return;
+      const it=item(k); it.names.add((r['Customer name']||'').trim()); it.d.push(r);});
+  });
+  const list=Object.values(items);
+  list.forEach(it=>{
+    const names=[...it.names].filter(Boolean), cust=it.rows.map(o=>o.customer||'');
+    it.verdict=!it.rows.length?'missing':(names.length&&names.every(n=>cust.some(c=>nameOK(n,c))))?'ok':'review';
+    it.trackerName=cust[0]||''; it.reportName=names[0]||'';
+  });
+  return {list,payout,files:parsed.filter(f=>f.type).map(f=>f.name+' ('+f.type+')')};
+}
+
+/* ---------- apply ---------- */
+function apply(plan,accept){
+  const c=C(), st={ok:0,review:0,missing:0,skipped:0,status:0,cost:0,freight:0};
+  plan.list.forEach(it=>{
+    if(it.verdict==='review'&&!accept.has(it.k)){st.skipped++;return;}
+    st[it.verdict]++;
+    const rec=c.byOrder[it.k]||(c.byOrder[it.k]={charges:{}});
+    if(it.m) Object.assign(rec,it.m);
+    it.d.forEach(r=>{const tpl=(r['TPL']||'').trim(); if(!rec.tpl&&tpl) rec.tpl=tpl; if(!rec.awb&&r['AWB Number']) rec.awb=r['AWB Number'];
+      rec.charges[[r['Payment Event name'],r['Payment type'],r['AWB Number']].join('|')]={ev:r['Payment Event name'],type:r['Payment type'],
+        amt:num(r['Payment Amount']),w:num(r['Order weight']),mode:r['Order Payment mode'],tpl,date:r['Status date']||''};});
+    const t=totals(rec); rec.fwd=t.fwd; rec.rto=t.rto; rec.cr=t.cr;
+    if(!it.rows.length) return;
+    rec.firstId=it.rows[0].id;
+    it.rows.forEach((o,i)=>{
+      if(it.m){const s=newStatus(o.status,it.m.ms); if(s!==o.status){o.status=s;st.status++;}}
+      if(it.d.length&&t.fwd>0){const v=i===0?t.fwd:0; if(Number(o.courierCost)!==v){o.courierCost=v;st.cost++;}}
+    });
+    if(it.d.length&&t.fwd>0) st.freight+=t.fwd;
+  });
+  c.uploads.push({at:new Date().toISOString(),files:plan.files.join(', '),...st}); c.uploads=c.uploads.slice(-30);
+  return st;
+}
+
+/* ---------- performance maths ---------- */
+function stats(){
+  const recs=Object.values(C().byOrder), g={}, st={}, md={};
+  const slab=w=>w<=0?'unknown':w<=0.5?'up to 0.5 kg':w<=1?'0.5–1 kg':w<=2?'1–2 kg':'2+ kg', rates={};
+  recs.forEach(r=>{
+    const t=r.tpl; if(r.state&&r.ms){const s=st[r.state]||(st[r.state]={n:0,del:0,rto:0}); s.n++; if(r.ms==='DELIVERED')s.del++; if(r.ms==='RTO')s.rto++;}
+    if(r.mode&&r.ms){const s=md[r.mode]||(md[r.mode]={n:0,del:0,rto:0}); s.n++; if(r.ms==='DELIVERED')s.del++; if(r.ms==='RTO')s.rto++;}
+    Object.values(r.charges||{}).forEach(x=>{ if(x.type==='DEBIT'&&!isRtoEv(x.ev)&&x.tpl){const k=x.tpl+'|'+slab(x.w);
+      const q=rates[k]||(rates[k]={tpl:x.tpl,slab:slab(x.w),n:0,min:1e9,max:0,sum:0}); q.n++;q.sum+=x.amt;q.min=Math.min(q.min,x.amt);q.max=Math.max(q.max,x.amt);}});
+    if(!t) return;
+    const x=g[t]||(g[t]={t,n:0,del:0,rto:0,days:[],ofd:[],fwd:0,fn:0,rt:0}); x.n++;
+    if(r.ms==='DELIVERED'){x.del++; const a=pd(r.picked),b=pd(r.deliv); if(a&&b)x.days.push((b-a)/864e5); x.ofd.push(r.ofd||0);}
+    if(r.ms==='RTO') x.rto++;
+    if(r.fwd>0){x.fn++;x.fwd+=r.fwd;} x.rt+=r.rto||0;
+  });
+  const avg=a=>a.length?a.reduce((p,q)=>p+q,0)/a.length:null;
+  const arr=Object.values(g).map(x=>{const res=x.del+x.rto; return {...x,res,rate:res?x.del/res:null,avgDays:avg(x.days),avgOfd:avg(x.ofd),avgFwd:x.fn?x.fwd/x.fn:null,spent:x.fwd+x.rt};});
+  const cheapest=Math.min(...arr.filter(x=>x.avgFwd).map(x=>x.avgFwd));
+  arr.forEach(x=>{x.score=x.res>=5?Math.round(50*x.rate+25*(x.avgDays==null?0.5:clamp(1-(x.avgDays-2)/8,0,1))+25*(x.avgFwd?cheapest/x.avgFwd:0.5)):null;});
+  arr.sort((a,b)=>(b.score??-1)-(a.score??-1)||b.n-a.n);
+  return {tpl:arr,states:Object.entries(st).map(([k,v])=>({k,...v})).sort((a,b)=>b.n-a.n).slice(0,12),modes:Object.entries(md).map(([k,v])=>({k,...v})),
+    rates:Object.values(rates).sort((a,b)=>a.tpl.localeCompare(b.tpl)||a.min-b.min)};
+}
+
+/* ---------- UI: upload + preview ---------- */
+function preview(plan){
+  const ch={}; let fN=0,fSum=0,deb=0,cr=0;
+  plan.list.forEach(it=>{
+    it.d.forEach(r=>{const a=num(r['Payment Amount']); if(r['Payment type']==='DEBIT')deb+=a; else cr+=a;});
+    if(it.verdict!=='ok') return;
+    if(it.m) it.rows.forEach(o=>{const s=newStatus(o.status,it.m.ms); if(s!==o.status){const k=o.status+' → '+s;ch[k]=(ch[k]||0)+1;}});
+    const f=it.d.filter(r=>r['Payment type']==='DEBIT'&&!isRtoEv(r['Payment Event name'])).reduce((a,r)=>a+num(r['Payment Amount']),0); if(f>0){fN++;fSum+=f;}});
+  const n=v=>plan.list.filter(i=>i.verdict===v);
+  const ok=n('ok'),rv=n('review'),ms=n('missing');
+  const payChk=plan.payout==null?'':(Math.abs((cr-deb)-plan.payout)<1?`<span class="badge good">Report total ${fmt(plan.payout)} matches</span>`:`<span class="badge needs">Report total ${fmt(plan.payout)} ≠ ${fmt(cr-deb)}</span>`);
+  document.getElementById('modalBox').style.maxWidth='760px';
+  openModal(`<h3>Review before syncing</h3>
+    <div class="modal-sub">${plan.files.join(' · ')||'No recognised file'}</div>
+    <div class="grid-kpi" style="margin-bottom:12px;">
+      <div class="kpi pos"><div class="lbl">Verified (ID + name)</div><div class="val">${ok.length}</div></div>
+      <div class="kpi ${rv.length?'neg':''}"><div class="lbl">Needs review</div><div class="val">${rv.length}</div></div>
+      <div class="kpi"><div class="lbl">Not in tracker</div><div class="val">${ms.length}</div></div>
+      <div class="kpi"><div class="lbl">Freight to post</div><div class="val">${fmt(fSum)}</div><div class="sub">${fN} orders ${payChk}</div></div></div>
+    <div class="hint" style="margin-bottom:10px;"><b>Status changes:</b> ${Object.keys(ch).length?Object.entries(ch).map(([k,v])=>`${k} (${v})`).join(' · '):'none'}</div>
+    ${rv.length?`<div class="callout"><b>Order ID found but customer name differs</b> — tick any you've checked and want applied.</div>
+      <div class="table-wrap" style="max-height:200px;overflow:auto;margin-bottom:10px;"><table><thead><tr><th></th><th>Order</th><th>Tracker name</th><th>Report name</th></tr></thead><tbody>
+      ${rv.map(i=>`<tr><td><input type="checkbox" class="rv" data-k="${i.k}"></td><td>#${i.k}</td><td>${i.trackerName||'—'}</td><td>${i.reportName||'—'}</td></tr>`).join('')}</tbody></table></div>`:''}
+    ${ms.length?`<div class="hint">Not in tracker yet (analysed for courier performance, nothing else changes): ${ms.slice(0,25).map(i=>'#'+i.k).join(', ')}${ms.length>25?' … +'+(ms.length-25):''}. Import the Shopify CSV first to bring these in.</div>`:''}
+    <div class="modal-actions"><button class="btn ghost" id="cpCancel">Cancel</button><button class="btn primary" id="cpApply">Apply sync</button></div>`);
+  document.getElementById('cpCancel').addEventListener('click',closeModal);
+  document.getElementById('cpApply').addEventListener('click',()=>{
+    const acc=new Set([...document.querySelectorAll('.rv:checked')].map(x=>x.dataset.k));
+    const s=apply(plan,acc); closeModal(); renderAll();
+    toast(`Synced: ${s.status} status updates, ${s.cost} courier costs${s.skipped?`, ${s.skipped} skipped`:''}`);
+  });
+}
+function handleFiles(files){
+  ensureCsvLib(()=>readFiles(files).then(parsed=>{
+    if(!parsed.some(f=>f.type)){toast('Not a ShipPrime Master or Daily report'); return;}
+    preview(makePlan(parsed));
+  }));
+}
+
+/* ---------- panel ---------- */
+const bar=(v,good)=>v==null?'—':`<b style="color:var(--${good?'sage':'rose'})">${pct(v)}</b>`;
+function renderCourier(c){
+  const S=stats(), ups=C().uploads.slice(-5).reverse();
+  const sc=x=>x.score==null?'<span class="badge locked">Low data</span>':`<span class="badge ${x.score>=80?'good':x.score>=60?'watch':'needs'}">${x.score}/100</span>`;
+  c.innerHTML=`
+    <div class="section-head"><div><h2>Delivery Partner</h2><p>Upload the ShipPrime <b>Master report</b> (final status) and/or <b>Daily report</b> (freight charged) — select both at once, any order. Orders are matched on Order ID, then verified by customer name. Verified orders get their status and courier cost updated automatically.</p></div>
+      <div><button class="btn primary" id="cpUpload">⬆ Upload reports</button><input type="file" id="cpFile" accept=".csv" multiple style="display:none"></div></div>
+    <div class="section-head"><div><h2 style="font-size:17px;">Courier scorecard</h2><p>Score = 50% delivery success (delivered ÷ delivered+RTO) + 25% speed (pickup→delivery, 2 days = full marks) + 25% cost (vs cheapest courier's avg freight). Needs 5+ resolved orders.</p></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Courier (TPL)</th><th class="num">Orders</th><th class="num">Delivered</th><th class="num">RTO</th><th class="num">Resolved</th><th class="num">Delivery %</th><th class="num">Avg days</th><th class="num">Avg attempts</th><th class="num">Avg freight</th><th class="num">Freight spent</th><th>Score</th></tr></thead><tbody>
+    ${S.tpl.length?S.tpl.map(x=>`<tr><td><b>${x.t}</b></td><td class="num">${x.n}</td><td class="num">${x.del}</td><td class="num">${x.rto}</td><td class="num">${x.res}</td><td class="num">${bar(x.rate,x.rate>=0.8)}</td><td class="num">${x.avgDays==null?'—':x.avgDays.toFixed(1)}</td><td class="num">${x.avgOfd==null?'—':x.avgOfd.toFixed(1)}</td><td class="num">${x.avgFwd==null?'—':fmt(x.avgFwd)}</td><td class="num">${fmt(x.spent)}</td><td>${sc(x)}</td></tr>`).join(''):`<tr><td colspan="11" class="empty">Upload a Master report to see courier performance.</td></tr>`}</tbody></table></div>
+    <div class="stitch"></div>
+    <div class="two-col"><div>
+      <div class="section-head"><div><h2 style="font-size:17px;">Observed rate card</h2><p>Forward freight actually charged, per courier and weight slab.</p></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Courier</th><th>Weight</th><th class="num">Shipments</th><th class="num">Min</th><th class="num">Avg</th><th class="num">Max</th></tr></thead><tbody>
+      ${S.rates.length?S.rates.map(q=>`<tr><td>${q.tpl}</td><td>${q.slab}</td><td class="num">${q.n}</td><td class="num">${fmt(q.min)}</td><td class="num">${fmt(q.sum/q.n)}</td><td class="num">${fmt(q.max)}</td></tr>`).join(''):`<tr><td colspan="6" class="empty">Upload a Daily report to see rates.</td></tr>`}</tbody></table></div></div>
+      <div>
+      <div class="section-head"><div><h2 style="font-size:17px;">COD vs Prepaid</h2></div></div>
+      <div class="table-wrap" style="margin-bottom:16px;"><table><thead><tr><th>Mode</th><th class="num">Orders</th><th class="num">Delivered</th><th class="num">RTO</th><th class="num">RTO %</th></tr></thead><tbody>
+      ${S.modes.map(m=>`<tr><td>${m.k}</td><td class="num">${m.n}</td><td class="num">${m.del}</td><td class="num">${m.rto}</td><td class="num">${bar(m.del+m.rto?m.rto/(m.del+m.rto):null,false)}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">No data</td></tr>'}</tbody></table></div>
+      <div class="section-head"><div><h2 style="font-size:17px;">Top states</h2></div></div>
+      <div class="table-wrap"><table><thead><tr><th>State</th><th class="num">Orders</th><th class="num">Delivered</th><th class="num">RTO</th><th class="num">RTO %</th></tr></thead><tbody>
+      ${S.states.map(m=>`<tr><td>${m.k}</td><td class="num">${m.n}</td><td class="num">${m.del}</td><td class="num">${m.rto}</td><td class="num">${bar(m.del+m.rto?m.rto/(m.del+m.rto):null,false)}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">No data</td></tr>'}</tbody></table></div></div></div>
+    <div class="stitch"></div>
+    <div class="section-head"><div><h2 style="font-size:17px;">Sync history</h2></div></div>
+    <div class="table-wrap"><table><thead><tr><th>When</th><th>Files</th><th class="num">Verified</th><th class="num">Review</th><th class="num">Not in tracker</th><th class="num">Status updates</th><th class="num">Freight posted</th></tr></thead><tbody>
+    ${ups.length?ups.map(u=>`<tr><td>${new Date(u.at).toLocaleString('en-IN')}</td><td>${u.files}</td><td class="num">${u.ok}</td><td class="num">${u.review+u.skipped}</td><td class="num">${u.missing}</td><td class="num">${u.status}</td><td class="num">${fmt(u.freight)}</td></tr>`).join(''):`<tr><td colspan="7" class="empty">No syncs yet.</td></tr>`}</tbody></table></div>`;
+  c.querySelector('#cpUpload').addEventListener('click',()=>c.querySelector('#cpFile').click());
+  c.querySelector('#cpFile').addEventListener('change',e=>{if(e.target.files.length) handleFiles(e.target.files); e.target.value='';});
+}
+
+/* ---------- hook into the existing app ---------- */
+TABS.splice(4,0,{key:'courier',label:'Delivery Partner'});
+ICON.courier='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="1" y="6" width="14" height="10" rx="1.5"/><path d="M15 9h4l3 3v4h-7"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/></svg>';
+const _ra=renderAll;
+renderAll=function(){
+  if(activeTab!=='courier') return _ra();
+  persist(); renderNav(); document.getElementById('topTitle').textContent='Delivery Partner'; animateBalance();
+  const c=document.getElementById('content'); c.innerHTML=''; renderCourier(c);
+};
+const _cm=closeModal;
+closeModal=function(){document.getElementById('modalBox').style.maxWidth='';_cm();};
+/* actual RTO freight (from Daily report) replaces the "forward × RTO multiplier" estimate */
+const _co=computeOrder;
+computeOrder=function(o){
+  const r=C().byOrder[nid(o.orderId)];
+  if(r&&r.rto>0&&(o.status==='RTO'||o.status==='Returned'))
+    o={...o,rtoMultiplierSnap:1,courierCost:(Number(o.courierCost)||0)+(o.id===r.firstId?r.rto:0)};
+  return _co(o);
+};
+window.courierSync={makePlan,apply,stats};
+})();
+  boot();
 </script>
 </body>
 </html>
