@@ -2033,6 +2033,77 @@ renderAll=function(){
   const c=document.getElementById('content'); c.innerHTML=''; renderPartial(c);
 };
 })();
+  /* ================= PATCH 3 — date bug, order counts, month-wise Orders =================
+   Paste this block just ABOVE  boot();  (after Patch 2). */
+(function(){
+const pad=n=>String(n).padStart(2,'0');
+const ld=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;   // LOCAL date, not UTC
+const oid=o=>String(o.orderId||o.id).replace(/^#/,'').trim().toLowerCase();
+
+/* 1. "This month / this week / yesterday" were built with toISOString() (UTC), which in India shifts local midnight
+      back a day — so the 30th of last month leaked into "This month". Rebuilt with local dates. */
+startOfWeekISO=function(d){const m=new Date(d); m.setDate(d.getDate()+(d.getDay()===0?-6:1-d.getDay())); return ld(m);};
+getAdPeriodRange=function(type,now=new Date()){
+  const today=ld(now);
+  if(type==='yesterday'){const y=new Date(now); y.setDate(now.getDate()-1); return {start:ld(y),end:ld(y),label:'Yesterday'};}
+  if(type==='thisWeek') return {start:startOfWeekISO(now),end:today,label:'This week (Mon–today)'};
+  if(type==='thisMonth') return {start:ld(new Date(now.getFullYear(),now.getMonth(),1)),end:today,label:'This month'};
+  return {start:null,end:null,label:'All time'};
+};
+/* "Add / Log" forms default their date to the UTC day — between 12:00am and 5:30am IST that is yesterday. Use local today. */
+const _om=openModal;
+openModal=function(html){
+  _om(html);
+  const h=document.querySelector('#modalBox h3'), f=document.getElementById('f_date');
+  if(f&&h&&/^(Add|Log)/.test(h.textContent)&&f.value===new Date().toISOString().slice(0,10)) f.value=ld(new Date());
+};
+
+/* 2. One Shopify order = one order, however many lines / quantities it has */
+const cnt=ords=>{const m=new Map(); ords.forEach(o=>{if(!m.has(oid(o))) m.set(oid(o),o.status);});
+  const s=[...m.values()], delivered=s.filter(x=>x==='Delivered').length, rto=s.filter(x=>x==='RTO'||x==='Returned').length;
+  return {total:m.size,delivered,rto,cancelled:s.filter(x=>x==='Cancelled').length,rtoRate:(delivered+rto)?rto/(delivered+rto):0};};
+const _cas=computeAdSummary;
+computeAdSummary=function(s,e){
+  const r=_cas(s,e), inR=d=>!s||(d&&d>=s&&d<=e);
+  r.totalOrders=new Set(state.orders.filter(o=>inR(o.date)).map(oid)).size;
+  r.cpp=r.totalOrders>0?r.adSpendTotal/r.totalOrders:null; return r;
+};
+const _dap=dailyAdPerformanceRows;
+dailyAdPerformanceRows=function(){
+  return _dap().map(r=>{const n=new Set(state.orders.filter(o=>o.date===r.date).map(oid)).size;
+    return {...r,totalOrders:n,cpp:n>0?r.adSpendTotal/n:null};});
+};
+const _dr=dashboardRows;
+dashboardRows=function(){return _dr().map(r=>({...r,...cnt(r.orders)}));};
+const _ct=computeTotalsForRange;
+computeTotalsForRange=function(s,e){
+  const r=_ct(s,e); return {...r,...cnt(state.orders.filter(o=>!s||(o.date&&o.date>=s&&o.date<=e)).map(computeOrder))};
+};
+
+/* 3. Orders tab: month-wise view. Defaults to THIS month, so a new month starts fresh. */
+let of={type:'thisMonth',month:'',start:'',end:''};
+const _ro=renderOrders;
+renderOrders=function(c){
+  const all=state.orders;
+  const months=[...new Set(all.map(o=>monthOf(o.date)).filter(Boolean))].sort((a,b)=>monthKey(b)-monthKey(a));
+  if(of.type==='month'&&!of.month) of.month=months[0]||'';
+  const r=of.type==='all'?{start:null,end:null,label:'All time'}:getPeriodRange(of.type,of.start,of.end,of.month);
+  const shown=r.start?all.filter(o=>o.date&&o.date>=r.start&&o.date<=r.end):all;
+  state.orders=shown; try{_ro(c);}finally{state.orders=all;}
+  const sel=(v,l)=>`<option value="${v}" ${of.type===v?'selected':''}>${l}</option>`;
+  c.querySelector('.section-head').insertAdjacentHTML('afterend',`
+    <div class="card" style="margin-bottom:16px;"><div class="form-grid" style="align-items:end;">
+      <div class="field"><label>Show orders for</label><select id="of_type">${sel('thisMonth','This month')}${sel('lastMonth','Last month')}${sel('month','Specific month')}${sel('custom','Custom date range')}${sel('all','All time')}</select></div>
+      ${of.type==='month'?`<div class="field"><label>Month</label><select id="of_month">${months.map(m=>`<option ${of.month===m?'selected':''}>${m}</option>`).join('')}</select></div>`:''}
+      ${of.type==='custom'?`<div class="field"><label>From</label><input type="date" id="of_start" value="${of.start}"></div><div class="field"><label>To</label><input type="date" id="of_end" value="${of.end}"></div>`:''}
+    </div><div class="hint">Showing <b>${new Set(shown.map(oid)).size}</b> orders · <b>${r.label}</b>${r.start?` (${r.start} to ${r.end})`:''}. A new month starts fresh automatically — pick any other period above.</div></div>`);
+  const on=(id,fn)=>{const e=c.querySelector('#'+id); if(e) e.addEventListener('change',fn);};
+  on('of_type',e=>{of.type=e.target.value; renderAll();});
+  on('of_month',e=>{of.month=e.target.value; renderAll();});
+  on('of_start',e=>{of.start=e.target.value; renderAll();});
+  on('of_end',e=>{of.end=e.target.value; renderAll();});
+};
+})();
   boot();
 </script>
 </body>
