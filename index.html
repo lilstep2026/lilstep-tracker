@@ -2104,6 +2104,106 @@ renderOrders=function(c){
   on('of_end',e=>{of.end=e.target.value; renderAll();});
 };
 })();
+ /* ================= PATCH 4 — Orders: multi-select + bulk actions, search/filter, CSV export, undo =================
+   Paste this block just ABOVE  boot();  (after Patch 3). Only wraps renderOrders — nothing else is touched. */
+(function(){
+const sel=new Set(); let undo=null, q='', fs='';
+const oid=o=>String(o.orderId||o.id).replace(/^#/,'').trim().toLowerCase();
+const cell=v=>`"${String(v==null?'':v).replace(/"/g,'""')}"`;
+const st=document.createElement('style');
+st.textContent=`#bk_bar{position:sticky;top:64px;z-index:4;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:10px 14px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#bk_bar input[type=text],#bk_bar select{font-family:var(--font-body);font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
+#bk_bar .info{font-size:12.5px;color:var(--ink-soft);flex:1;min-width:200px}#bk_bar button:disabled{opacity:.4;cursor:not-allowed}
+tr.bk-sel td{background:#F7E9DC!important}`;
+document.head.appendChild(st);
+
+function act(label,fn){undo={label,data:JSON.stringify(state.orders)};fn();sel.clear();toast(label+' — use Undo in the bar to reverse');renderAll();}
+function applyPrice(o,m,p){
+  const pr=getProduct(o.productId)||{}, A=state.assumptions;
+  if(m==='custom'){o.priceSnap=p;return;}
+  o.materialSnap=Number(pr.material)||0;o.packagingSnap=Number(pr.packaging)||0;o.otherSnap=Number(pr.other)||0;
+  if(m==='master'){
+    if(Number(pr.price)>0) o.priceSnap=Number(pr.price);   // never overwrite a real price with a 0 from an auto-created product
+    o.gatewayFeePctSnap=Number(A.gatewayFeePct)||0;o.gstPctSnap=Number(A.gstPct)||0;o.codFeePctSnap=Number(A.codFeePct)||0;o.rtoMultiplierSnap=Number(A.rtoMultiplier)||1;
+  }
+}
+function priceModal(){
+  const lines=state.orders.filter(o=>sel.has(o.id));
+  openModal(`<h3>Update price / cost for ${lines.length} selected line${lines.length>1?'s':''}</h3>
+    <div class="modal-sub">Changes only the selected orders' recorded numbers. Everything else keeps its locked-in values.</div>
+    <div class="form-grid"><div class="field full"><label>What to update</label><select id="bk_m">
+      <option value="master">Current Product Master price + cost + fee rates (same as the ↻ icon)</option>
+      <option value="cost">Current Product Master cost only (keep each order's selling price)</option>
+      <option value="custom">Set one custom selling price (₹ per unit)</option></select></div>
+      <div class="field full" id="bk_pw" style="display:none"><label>New unit price (₹)</label><input type="number" id="bk_p" min="0"></div>
+      <div class="full hint" id="bk_prev"></div></div>
+    <div class="modal-actions"><button class="btn ghost" id="mCancel">Cancel</button><button class="btn primary" id="mGo">Apply to selected</button></div>`);
+  const m=document.getElementById('bk_m'),p=document.getElementById('bk_p');
+  const prev=()=>{const mode=m.value,price=Number(p.value)||0;document.getElementById('bk_pw').style.display=mode==='custom'?'':'none';
+    const before=sum(lines.map(o=>computeOrder(o).grossProfit));
+    const after=sum(lines.map(o=>{const c={...o};applyPrice(c,mode,price);return computeOrder(c).grossProfit;}));
+    document.getElementById('bk_prev').innerHTML=`Gross profit of these lines: <b>${fmt(before)}</b> → <b style="color:var(--${after>=before?'sage':'rose'})">${fmt(after)}</b> (${after>=before?'+':''}${fmt(after-before)})`;};
+  m.addEventListener('change',prev);p.addEventListener('input',prev);prev();
+  document.getElementById('mCancel').addEventListener('click',closeModal);
+  document.getElementById('mGo').addEventListener('click',()=>{
+    const mode=m.value,price=Number(p.value)||0; if(mode==='custom'&&!(price>0)){toast('Enter a price above 0');return;}
+    closeModal();act(`Updated ${lines.length} line(s)`,()=>state.orders.forEach(o=>{if(sel.has(o.id))applyPrice(o,mode,price);}));
+  });
+}
+
+const _ro=renderOrders;
+renderOrders=function(c){
+  _ro(c);
+  const tbl=c.querySelector('.table-wrap table'); if(!tbl) return;
+  const have=new Set(state.orders.map(o=>o.id)); [...sel].forEach(i=>{if(!have.has(i))sel.delete(i);});
+  const rows=[...tbl.querySelectorAll('tbody tr')].map(tr=>{const b=tr.querySelector('[data-edit]');return b?{tr,id:b.dataset.edit}:null;}).filter(Boolean);
+  const byId=new Map(state.orders.map(o=>[o.id,o]));
+  tbl.querySelector('thead tr').insertAdjacentHTML('afterbegin','<th><input type="checkbox" id="bk_all" title="Select all visible"></th>');
+  rows.forEach(r=>r.tr.insertAdjacentHTML('afterbegin',`<td><input type="checkbox" class="bk" data-id="${r.id}"></td>`));
+  tbl.closest('.table-wrap').insertAdjacentHTML('beforebegin',`<div id="bk_bar">
+    <input type="text" id="bk_q" placeholder="Search order, customer, product…" value="${q.replace(/"/g,'&quot;')}">
+    <select id="bk_fs"><option value="">All statuses</option>${['Unfulfilled','In Transit','Delivered','RTO','Returned','Cancelled'].map(s=>`<option ${fs===s?'selected':''}>${s}</option>`).join('')}</select>
+    <span class="info" id="bk_info"></span>
+    <button class="btn small" data-need id="bk_price">Update price / cost</button>
+    <select id="bk_st" data-need><option value="">Set status…</option>${['Unfulfilled','In Transit','Delivered','RTO','Returned','Cancelled'].map(s=>`<option>${s}</option>`).join('')}</select>
+    <button class="btn small danger" data-need id="bk_del">Delete</button>
+    <button class="btn small" id="bk_csv">⬇ CSV</button>
+    <button class="btn small" id="bk_undo" style="display:none"></button></div>`);
+  const $=id=>c.querySelector('#'+id), vis=()=>rows.filter(r=>r.tr.style.display!=='none');
+  const paint=()=>{
+    const os=[...sel].map(i=>byId.get(i)).filter(Boolean).map(computeOrder), n=os.length;
+    $('bk_info').innerHTML=n?`<b>${n}</b> line${n>1?'s':''} · ${new Set(os.map(oid)).size} order${new Set(os.map(oid)).size>1?'s':''} · revenue ${fmt(sum(os.map(o=>o.netRevenue)))} · gross profit ${fmt(sum(os.map(o=>o.grossProfit)))}`
+      :`${vis().length} shown — tick orders for bulk actions (all lines of one order are ticked together)`;
+    c.querySelectorAll('#bk_bar [data-need]').forEach(b=>b.disabled=!n);
+    rows.forEach(r=>{const on=sel.has(r.id);r.tr.classList.toggle('bk-sel',on);r.tr.querySelector('.bk').checked=on;});
+    const v=vis();$('bk_all').checked=v.length>0&&v.every(r=>sel.has(r.id));
+    const u=$('bk_undo');u.style.display=undo?'':'none';if(undo)u.textContent='↶ Undo: '+undo.label;
+  };
+  const filt=()=>{const t=q.toLowerCase();rows.forEach(r=>{const ok=(!t||r.tr.textContent.toLowerCase().includes(t))&&(!fs||(r.tr.querySelector('.badge')||{}).textContent===fs);r.tr.style.display=ok?'':'none';});paint();};
+  let last=null;
+  rows.forEach((r,i)=>r.tr.querySelector('.bk').addEventListener('click',e=>{
+    const on=e.target.checked, grp=new Set();
+    if(e.shiftKey&&last!==null){const [a,b]=[Math.min(i,last),Math.max(i,last)];rows.slice(a,b+1).forEach(x=>{if(x.tr.style.display!=='none')grp.add(oid(byId.get(x.id)));});}
+    else grp.add(oid(byId.get(r.id)));
+    rows.forEach(x=>{if(grp.has(oid(byId.get(x.id)))) on?sel.add(x.id):sel.delete(x.id);});
+    last=i;paint();}));
+  $('bk_all').addEventListener('change',e=>{vis().forEach(r=>e.target.checked?sel.add(r.id):sel.delete(r.id));paint();});
+  $('bk_q').addEventListener('input',e=>{q=e.target.value;filt();});
+  $('bk_fs').addEventListener('change',e=>{fs=e.target.value;filt();});
+  $('bk_price').addEventListener('click',priceModal);
+  $('bk_st').addEventListener('change',e=>{const s=e.target.value;e.target.value='';if(!s||!sel.size)return;
+    if(confirm(`Set status to "${s}" on ${sel.size} selected line(s)?`)) act(`Status → ${s} on ${sel.size} line(s)`,()=>state.orders.forEach(o=>{if(sel.has(o.id))o.status=s;}));});
+  $('bk_del').addEventListener('click',()=>{const n=sel.size;
+    if(n&&confirm(`Delete ${n} selected order line(s)? You can undo this right after.`)) act(`Deleted ${n} line(s)`,()=>{state.orders=state.orders.filter(o=>!sel.has(o.id));});});
+  $('bk_undo').addEventListener('click',()=>{if(!undo)return;state.orders=JSON.parse(undo.data);undo=null;sel.clear();toast('Undone');renderAll();});
+  $('bk_csv').addEventListener('click',()=>{
+    const list=(sel.size?rows.filter(r=>sel.has(r.id)):vis()).map(r=>computeOrder(byId.get(r.id)));
+    const head=['Date','Order ID','Customer','Product','Qty','Price','Net Revenue','Mode','Advance','Balance','Courier','Status','Gross Profit'];
+    const csv=[head.map(cell).join(',')].concat(list.map(o=>[o.date,o.orderId,o.customer,o.productName,o.qty,o.price,o.netRevenue,o.paymentMode,o.advance,o.balanceDue,o.courierEff,o.status,Math.round(o.grossProfit*100)/100].map(cell).join(','))).join('\n');
+    const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='lilstep-orders.csv';a.click();toast(`Exported ${list.length} lines`);});
+  filt();
+};
+})();
   boot();
 </script>
 </body>
