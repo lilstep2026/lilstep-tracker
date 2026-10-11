@@ -2204,6 +2204,93 @@ renderOrders=function(c){
   filt();
 };
 })();
+  /* ================= PATCH 5 — price-safe COGS update, recovery for EVERYTHING, dashboard health check =================
+   Paste this block just ABOVE  boot();  (after Patch 4). */
+(function(){
+const oid=o=>String(o.orderId||o.id).replace(/^#/,'').trim().toLowerCase();
+
+/* 1. ↻ on an order now updates ONLY cost (material / packaging / other) from Product Master.
+      Selling price, discount, shipping and fee rates stay exactly as imported from Shopify. */
+document.addEventListener('click',e=>{
+  const b=e.target.closest&&e.target.closest('[data-relock]'); if(!b) return;
+  e.stopPropagation(); e.preventDefault();
+  const o=state.orders.find(x=>x.id===b.dataset.relock); if(!o) return;
+  if(!confirm("Update this order's COGS (material, packaging, other) to the current Product Master cost?\nSelling price, discount and shipping are NOT changed.")) return;
+  const p=getProduct(o.productId)||{};
+  o.materialSnap=Number(p.material)||0; o.packagingSnap=Number(p.packaging)||0; o.otherSnap=Number(p.other)||0;
+  toast('COGS updated — price untouched'); renderAll();
+},true);
+const _om0=openModal;
+openModal=function(html){            // relabel the bulk-update option so it says what it really does
+  _om0(html); const h=document.querySelector('#modalBox h3'), o=document.querySelector('#bk_m option[value="master"]');
+  if(h&&/^Update price/.test(h.textContent)&&o) o.textContent='Current Product Master COGS + fee rates (selling price untouched)';
+};
+
+/* 2. Recovery: every change anywhere (orders, products, stock, bank, expenses, ads, settings, delivery data, imports,
+      clear-all…) is captured automatically. Last 40 versions kept in this browser (IndexedDB). */
+const NAMES={orders:'Orders',products:'Products',inventory:'Inventory',bank:'Bank',expenses:'Expenses',adSpend:'Ad spend',assumptions:'Settings',courier:'Delivery data'};
+let hist=[], last=null, idb=null;
+const idbOpen=()=>new Promise(r=>{try{const q=indexedDB.open('lilstep_history',1);q.onupgradeneeded=()=>q.result.createObjectStore('s',{keyPath:'ts'});q.onsuccess=()=>{idb=q.result;r();};q.onerror=()=>r();}catch(e){r();}});
+const idbAll=()=>new Promise(r=>{if(!idb)return r([]);try{const q=idb.transaction('s').objectStore('s').getAll();q.onsuccess=()=>r(q.result||[]);q.onerror=()=>r([]);}catch(e){r([]);}});
+const idbPut=x=>{try{idb&&idb.transaction('s','readwrite').objectStore('s').put(x);}catch(e){}};
+const idbDel=t=>{try{idb&&idb.transaction('s','readwrite').objectStore('s').delete(t);}catch(e){}};
+function describe(a,b){
+  const A=JSON.parse(a),B=JSON.parse(b),out=[];
+  new Set([...Object.keys(A),...Object.keys(B)]).forEach(k=>{
+    if(k==='feePolicy2'||JSON.stringify(A[k])===JSON.stringify(B[k])) return;
+    const n=Array.isArray(A[k])?A[k].length:null, m=Array.isArray(B[k])?B[k].length:null;
+    out.push((NAMES[k]||k)+(n!=null&&n!==m?` ${n}→${m}`:' edited'));
+  });
+  return out.join(', ')||'changed';
+}
+function ui(){const u=document.getElementById('hxUndo'); if(u) u.disabled=!hist.length;}
+function snap(json,label){
+  const x={ts:Date.now(),label,json}; hist.unshift(x); idbPut(x);
+  while(hist.length>40) idbDel(hist.pop().ts); ui();
+}
+const _persist=persist;
+persist=function(){
+  try{const now=JSON.stringify(state); if(last!==null&&now!==last) snap(last,describe(last,now)); last=now;}catch(e){}
+  return _persist();
+};
+function restore(i){
+  const x=hist[i]; if(!x) return;
+  state=JSON.parse(x.json); migrateOrderSnapshots(); renderAll();
+  toast('Restored the version from '+new Date(x.ts).toLocaleTimeString('en-IN'));
+}
+function historyModal(){
+  openModal(`<h3>Recovery history</h3>
+    <div class="modal-sub">Each row is a full copy of your data <b>from just before</b> the change named on it. Restoring also saves your current data as a new row, so a restore can be undone too.</div>
+    <div class="table-wrap" style="max-height:55vh;overflow:auto;"><table><thead><tr><th>Before this change</th><th>When</th><th class="num">Size</th><th></th></tr></thead><tbody>
+    ${hist.length?hist.map((x,i)=>`<tr><td>${x.label}</td><td>${new Date(x.ts).toLocaleString('en-IN')}</td><td class="num">${Math.round(x.json.length/1024)} KB</td><td><button class="btn small" data-hx="${i}">Restore</button></td></tr>`).join(''):'<tr><td colspan="4" class="empty">No changes recorded yet.</td></tr>'}
+    </tbody></table></div><div class="modal-actions"><button class="btn primary" id="hxClose">Close</button></div>`);
+  document.getElementById('hxClose').addEventListener('click',closeModal);
+  document.querySelectorAll('[data-hx]').forEach(b=>b.addEventListener('click',()=>{
+    if(confirm('Restore your whole tracker to this earlier version?')){closeModal(); restore(+b.dataset.hx);}}));
+}
+document.querySelector('.top-actions').insertAdjacentHTML('afterbegin','<button class="btn" id="hxUndo" title="Undo the last change, anywhere in the tracker" disabled>↶ Undo</button><button class="btn" id="hxOpen">🕘 History</button>');
+document.getElementById('hxUndo').addEventListener('click',()=>{if(hist.length) restore(0);});
+document.getElementById('hxOpen').addEventListener('click',historyModal);
+idbOpen().then(idbAll).then(a=>{hist=a.sort((x,y)=>y.ts-x.ts).slice(0,40); ui();});
+
+/* 3. Dashboard health check — things that quietly distort profit or need action */
+const _rd=renderDashboard;
+renderDashboard=function(c){
+  _rd(c);
+  const now=Date.now(), age=o=>(now-new Date(o.date+'T00:00:00'))/864e5, ids=l=>[...new Set(l.map(o=>o.orderId))];
+  const zero=state.products.filter(p=>productCOGS(p)===0&&state.orders.some(o=>o.productId===p.id&&o.status!=='Cancelled'));
+  const stuck=state.orders.filter(o=>o.date&&((o.status==='In Transit'&&age(o)>10)||(o.status==='Unfulfilled'&&age(o)>4)));
+  const nofreight=state.orders.filter(o=>o.status==='Delivered'&&!(Number(o.courierCost)>0)&&oid(o)!==''&&state.orders.find(x=>oid(x)===oid(o))===o);
+  const cod=sum(state.orders.map(computeOrder).filter(o=>o.paymentMode==='COD'&&(o.status==='In Transit'||o.status==='Unfulfilled')).map(o=>o.balanceDue));
+  const items=[];
+  if(zero.length) items.push(`<b>COGS is ₹0</b> on ${zero.map(p=>p.name).join(', ')} — profit on these is overstated. Fix in Product Master, then ↻ the orders.`);
+  if(stuck.length) items.push(`<b>${ids(stuck).length} order(s) look stuck</b> (In Transit &gt; 10 days or Unfulfilled &gt; 4 days): ${ids(stuck).slice(0,8).join(', ')}${ids(stuck).length>8?' …':''}. Upload the latest Master report on Delivery Partner.`);
+  if(nofreight.length) items.push(`<b>${nofreight.length} delivered order(s) have no courier cost</b> — upload the Daily report so freight is counted.`);
+  const box=`<div class="callout ${items.length?'':'sage'}" style="margin-bottom:18px;"><b>${items.length?'Needs attention':'Health check: all clear'}</b>${items.length?'<ul style="margin:8px 0 0 18px;padding:0;">'+items.map(i=>`<li>${i}</li>`).join('')+'</ul>':''}
+    <div class="hint" style="margin-top:8px;">COD balance still to be collected from open orders: <b>${fmt(cod)}</b></div></div>`;
+  const k=c.querySelector('.grid-kpi'); if(k) k.insertAdjacentHTML('beforebegin',box);
+};
+})();
   boot();
 </script>
 </body>
