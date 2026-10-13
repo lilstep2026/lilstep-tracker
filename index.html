@@ -2291,6 +2291,94 @@ renderDashboard=function(c){
   const k=c.querySelector('.grid-kpi'); if(k) k.insertAdjacentHTML('beforebegin',box);
 };
 })();
+  /* ================= PATCH 6 — Upload ad spend from a CSV file =================
+   Paste this block just ABOVE  boot();  (after Patch 5).
+   Adds "⬆ Upload ad spend (CSV)" on the Ad Spend tab.
+   Reads: Date + (Total incl. GST  or  Ad Spend) columns. Shows a preview before saving.
+   Rows with ₹0 are skipped. Every upload can be reversed with ↶ Undo / 🕘 History. */
+(function(){
+const pad=x=>String(x).padStart(2,'0');
+const normDate=s=>{
+  s=String(s||'').trim();
+  let m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if(m) return `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
+  m=s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})/); if(m) return `${m[3]}-${pad(m[2])}-${pad(m[1])}`;
+  return null;
+};
+const toNum=v=>Number(String(v==null?'':v).replace(/[^\d.\-]/g,''))||0;
+
+function readAdFile(file){
+  const reader=new FileReader();
+  reader.onload=ev=>ensureCsvLib(()=>{
+    const p=Papa.parse(ev.target.result,{header:true,skipEmptyLines:true});
+    const h=(p.meta&&p.meta.fields)||[];
+    const dateCol=h.find(x=>/date/i.test(x));
+    const totalCol=h.find(x=>/total/i.test(x));
+    const baseCol=h.find(x=>/ad\s*spend/i.test(x)&&!/gst|total/i.test(x)) || (!totalCol?h.find(x=>/amount|spend|cost/i.test(x)):null);
+    if(!dateCol||(!totalCol&&!baseCol)){ toast('Could not find a Date and an Ad Spend column in this file'); return; }
+    const byDate=new Map(); let bad=0;
+    p.data.forEach(r=>{
+      const d=normDate(r[dateCol]); if(!d){bad++;return;}
+      const base=toNum(baseCol?r[baseCol]:r[totalCol]), total=toNum(totalCol?r[totalCol]:r[baseCol]);
+      const x=byDate.get(d)||{date:d,base:0,total:0}; x.base+=base; x.total+=total; byDate.set(d,x);
+    });
+    const rows=[...byDate.values()].sort((a,b)=>a.date<b.date?-1:1);
+    if(!rows.length){ toast('No valid dated rows found in this file'); return; }
+    adUploadModal(rows,file.name,!!(totalCol&&baseCol),bad);
+  });
+  reader.onerror=()=>toast('Could not read that file');
+  reader.readAsText(file);
+}
+
+function adUploadModal(rows,fname,hasBoth,bad){
+  const nz=k=>rows.filter(r=>r[k]>0);
+  const existing=new Set(state.adSpend.map(a=>a.date));
+  const clash=rows.filter(r=>r.total>0&&existing.has(r.date)).length;
+  openModal(`
+    <h3>Upload ad spend</h3>
+    <div class="modal-sub">${fname} · ${rows.length} days (${rows[0].date} to ${rows[rows.length-1].date})${bad?` · ${bad} unreadable row(s) ignored`:''}</div>
+    <div class="grid-kpi" style="margin-bottom:12px;">
+      <div class="kpi"><div class="lbl">Days with spend</div><div class="val">${nz('total').length}</div><div class="sub">₹0 days are skipped</div></div>
+      <div class="kpi"><div class="lbl">${hasBoth?'Total incl. GST':'Total'}</div><div class="val">${fmt(sum(rows.map(r=>r.total)))}</div></div>
+      ${hasBoth?`<div class="kpi"><div class="lbl">Without GST</div><div class="val">${fmt(sum(rows.map(r=>r.base)))}</div></div>`:''}
+    </div>
+    <div class="form-grid">
+      ${hasBoth?`<div class="field full"><label>Which amount to log?</label><select id="au_amt">
+        <option value="total">Total incl. GST (recommended — GST on ads is a real cash cost)</option>
+        <option value="base">Ad spend only (without GST)</option></select></div>`:''}
+      <div class="field full"><label>If a date already has an entry in the tracker${clash?` (${clash} date${clash>1?'s':''} do)`:''}</label><select id="au_dup">
+        <option value="replace">Replace it with the uploaded amount (safe to re-upload the same file)</option>
+        <option value="skip">Keep my existing entry, skip that date</option>
+        <option value="add">Add the uploaded amount as an extra entry</option></select></div>
+    </div>
+    <div class="modal-actions"><button class="btn ghost" id="mCancel">Cancel</button><button class="btn primary" id="mGo">Import ad spend</button></div>`);
+  document.getElementById('mCancel').addEventListener('click',closeModal);
+  document.getElementById('mGo').addEventListener('click',()=>{
+    const key=hasBoth?document.getElementById('au_amt').value:'total';
+    const dup=document.getElementById('au_dup').value;
+    const note=`Uploaded from ${fname}${hasBoth?(key==='total'?' (incl. GST)':' (excl. GST)'):''}`;
+    let added=0,replaced=0,skipped=0,sumAdded=0;
+    rows.forEach(r=>{
+      const amt=Math.round(r[key]*100)/100; if(!(amt>0)) return;
+      const has=state.adSpend.some(a=>a.date===r.date);
+      if(has&&dup==='skip'){skipped++;return;}
+      if(has&&dup==='replace'){state.adSpend=state.adSpend.filter(a=>a.date!==r.date);replaced++;}
+      state.adSpend.push({id:uid(),date:r.date,amount:amt,notes:note}); added++; sumAdded+=amt;
+    });
+    closeModal(); renderAll();
+    toast(`Imported ${added} day(s) · ${fmt(sumAdded)}${replaced?` · ${replaced} replaced`:''}${skipped?` · ${skipped} skipped`:''}`);
+  });
+}
+
+const _rad=renderAdSpend;
+renderAdSpend=function(c){
+  _rad(c);
+  const add=c.querySelector('#addAd'); if(!add) return;
+  add.insertAdjacentHTML('beforebegin','<button class="btn" id="adUpload">⬆ Upload ad spend (CSV)</button><input type="file" id="adUploadFile" accept=".csv" style="display:none">');
+  c.querySelector('#adUpload').addEventListener('click',()=>c.querySelector('#adUploadFile').click());
+  c.querySelector('#adUploadFile').addEventListener('change',e=>{const f=e.target.files[0]; if(f) readAdFile(f); e.target.value='';});
+  add.parentElement.style.display='flex'; add.parentElement.style.gap='8px';
+};
+})();
   boot();
 </script>
 </body>
