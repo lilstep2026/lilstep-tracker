@@ -2497,6 +2497,125 @@ renderAll=function(){
   const c=document.getElementById('content'); c.innerHTML=''; renderRto(c);
 };
 })();
+    /* ================= PATCH 7 — RTO Tracking (auto-detected, manually confirmed) + Courier & AWB ================= */
+(function(){
+const oid=o=>String(o.orderId||o.id).replace(/^#/,'').trim().toLowerCase();
+const RTOSET=new Set(['RTO','Returned']);
+const STATUSES=['Pending confirmation','Received back','Received back — damaged','Not received — follow up','Lost / written off'];
+
+function R(){ return state.rto || (state.rto={}); }
+
+function syncRto(){
+  const r=R(), seen=new Set(), groups={};
+  state.orders.forEach(o=>{ if(!RTOSET.has(o.status)) return; const k=oid(o); (groups[k]=groups[k]||[]).push(o); });
+  Object.keys(groups).forEach(k=>{
+    seen.add(k);
+    if(!r[k]) r[k]={status:'Pending confirmation', flaggedAt:new Date().toISOString(), receivedDate:'', note:'', courier:'', awb:''};
+  });
+  Object.keys(r).forEach(k=>{ if(!seen.has(k)) delete r[k]; });
+}
+
+function rows(){
+  syncRto();
+  const r=R(), groups={}, cr=(state.courier&&state.courier.byOrder)||{};
+  state.orders.forEach(o=>{ if(!RTOSET.has(o.status)) return; const k=oid(o); (groups[k]=groups[k]||[]).push(o); });
+  return Object.entries(groups).map(([k,lines])=>{
+    const first=computeOrder(lines[0]);
+    const qty=sum(lines.map(l=>l.qty));
+    const products=[...new Set(lines.map(l=>(getProduct(l.productId)||{}).name||'— deleted product —'))].join(', ');
+    const rec=r[k]||{status:'Pending confirmation',flaggedAt:'',receivedDate:'',note:''};
+    const sy=cr[k]||{};
+    const days=rec.flaggedAt?Math.floor((Date.now()-new Date(rec.flaggedAt))/864e5):null;
+    return {k, date:first.date, orderId:first.orderId, customer:first.customer, products, qty,
+      grossProfit:sum(lines.map(l=>computeOrder(l).grossProfit)), ...rec,
+      courier: sy.tpl||rec.courier||'', awb: sy.awb||rec.awb||'', days};
+  }).sort((a,b)=>(a.date<b.date?1:-1));
+}
+
+function badgeFor(s){
+  const cls = s==='Received back'?'good': s==='Pending confirmation'?'watch': (s==='Lost / written off'||s==='Received back — damaged')?'rto':'needs';
+  return `<span class="badge ${cls}">${s}</span>`;
+}
+
+function renderRto(c){
+  const list=rows();
+  const pending=list.filter(x=>x.status==='Pending confirmation');
+  const notRec=list.filter(x=>x.status==='Not received — follow up');
+  const lost=list.filter(x=>x.status==='Lost / written off'||x.status==='Received back — damaged');
+  const received=list.filter(x=>x.status==='Received back');
+  const overdue=pending.filter(x=>x.days!=null&&x.days>5);
+  c.innerHTML=`
+    <div class="section-head"><div><h2>RTO Tracking</h2><p>Every order the courier marks RTO or Returned lands here automatically. Confirm whether the package has actually come back. <b>Received back</b> returns the product cost (COGS) to your books; damaged, lost or not-received parcels keep the COGS loss.</p></div></div>
+    <div class="grid-kpi">
+      <div class="kpi"><div class="lbl">Total RTO orders</div><div class="val">${list.length}</div></div>
+      <div class="kpi ${pending.length?'neg':''}"><div class="lbl">Pending confirmation</div><div class="val">${pending.length}</div><div class="sub">${overdue.length} over 5 days</div></div>
+      <div class="kpi ${notRec.length?'neg':''}"><div class="lbl">Not received yet</div><div class="val">${notRec.length}</div></div>
+      <div class="kpi pos"><div class="lbl">Received back (resellable)</div><div class="val">${received.length}</div></div>
+      <div class="kpi"><div class="lbl">Lost / damaged</div><div class="val">${lost.length}</div></div>
+    </div>
+    ${overdue.length?`<div class="callout"><b>${overdue.length} RTO order(s)</b> have been pending confirmation for more than 5 days — worth chasing the courier: ${overdue.slice(0,10).map(x=>x.orderId+(x.awb?' (AWB '+x.awb+')':'')).join(', ')}${overdue.length>10?' …':''}</div>`:''}
+    <div class="table-wrap"><table>
+      <thead><tr><th>RTO flagged</th><th>Order ID</th><th>Customer</th><th>Delivery company</th><th>AWB number</th><th>Product(s)</th><th class="num">Qty</th><th class="num">Days pending</th><th>Confirmation status</th><th>Received date</th><th>Note</th><th class="num">Gross Profit</th><th></th></tr></thead>
+      <tbody>
+        ${list.length? list.map(x=>`
+          <tr>
+            <td>${x.flaggedAt?new Date(x.flaggedAt).toLocaleDateString('en-IN'):'—'}</td>
+            <td>${x.orderId}</td><td>${x.customer||'—'}</td>
+            <td>${x.courier||'—'}</td>
+            <td style="font-family:var(--font-mono);">${x.awb||'—'}</td>
+            <td>${x.products}</td><td class="num">${x.qty}</td>
+            <td class="num">${x.days==null?'—':x.days}</td>
+            <td>${badgeFor(x.status)}</td>
+            <td>${x.receivedDate||'—'}</td>
+            <td style="white-space:normal;max-width:220px;">${x.note||''}</td>
+            <td class="num" style="color:${x.grossProfit>=0?'var(--sage)':'var(--rose)'};font-weight:600;">${fmt(x.grossProfit)}</td>
+            <td><button class="btn small" data-rto="${x.k}">Update</button></td>
+          </tr>`).join('') : `<tr><td colspan="13" class="empty">No RTO or Returned orders right now.</td></tr>`}
+      </tbody>
+    </table></div>
+  `;
+  c.querySelectorAll('[data-rto]').forEach(b=>b.addEventListener('click',()=>rtoModal(b.dataset.rto)));
+}
+
+function rtoModal(k){
+  const r=R(), rec=r[k]||{status:'Pending confirmation',flaggedAt:new Date().toISOString(),receivedDate:'',note:''};
+  const row=rows().find(x=>x.k===k)||{orderId:k,customer:'',products:'',courier:'',awb:''};
+  openModal(`
+    <h3>Confirm RTO — ${row.orderId}</h3>
+    <div class="modal-sub">${row.customer||''} · ${row.products||''}${row.days!=null?` · flagged ${row.days} day(s) ago`:''}</div>
+    <div class="form-grid">
+      <div class="field"><label>Delivery company</label><input type="text" id="r_courier" value="${row.courier||''}" placeholder="e.g. Delhivery"></div>
+      <div class="field"><label>AWB number</label><input type="text" id="r_awb" value="${row.awb||''}"></div>
+      <div class="field full"><label>Has the courier actually returned this item?</label>
+        <select id="r_status">${STATUSES.map(s=>`<option value="${s}" ${rec.status===s?'selected':''}>${s}</option>`).join('')}</select>
+      </div>
+      <div class="field"><label>Date received (if applicable)</label><input type="date" id="r_date" value="${rec.receivedDate||''}"></div>
+      <div class="field full"><label>Note (condition, follow-up, who confirmed, etc.)</label><input type="text" id="r_note" value="${rec.note||''}"></div>
+      <div class="full hint"><b>Received back</b> = resellable, product cost is returned to your profit. <b>Received back — damaged</b>, <b>Lost</b> and <b>Not received</b> keep the product cost as a loss.</div>
+    </div>
+    <div class="modal-actions"><button class="btn ghost" id="mCancel">Cancel</button><button class="btn primary" id="mSave">Save</button></div>
+  `);
+  document.getElementById('mCancel').addEventListener('click',closeModal);
+  document.getElementById('mSave').addEventListener('click',()=>{
+    R()[k]={...rec,
+      status:document.getElementById('r_status').value,
+      receivedDate:document.getElementById('r_date').value,
+      note:document.getElementById('r_note').value,
+      courier:document.getElementById('r_courier').value.trim(),
+      awb:document.getElementById('r_awb').value.trim()};
+    closeModal(); toast('RTO status updated'); renderAll();
+  });
+}
+
+TABS.splice(TABS.findIndex(t=>t.key==='adspend')+1,0,{key:'rto',label:'RTO Tracking'});
+ICON.rto='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
+const _ra3=renderAll;
+renderAll=function(){
+  if(activeTab!=='rto') return _ra3();
+  persist(); renderNav(); document.getElementById('topTitle').textContent='RTO Tracking'; animateBalance();
+  const c=document.getElementById('content'); c.innerHTML=''; renderRto(c);
+};
+})();
   boot();
 </script>
 </body>
