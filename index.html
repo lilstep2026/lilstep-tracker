@@ -1770,7 +1770,6 @@ document.getElementById('fileImport').addEventListener('change',e=>{
 
 /* ================= INIT ================= */
 /* ================= DELIVERY PARTNER SYNC (ShipPrime Master + Daily charges) =================
-   Paste this whole block just ABOVE the line:  boot();   (the last line of the script).
    Master report  -> final order status, courier (TPL), AWB, dates, state, OFD attempts
    Daily report   -> freight debited per order (+ COD credits) -> fills "Courier" cost on the order
    Match rule: Order ID (#1384) must match AND customer name must match; otherwise it goes to "Needs review". */
@@ -1963,8 +1962,8 @@ computeOrder=function(o){
 };
 window.courierSync={makePlan,apply,stats};
 })();
-  /* ================= PATCH 2 — gateway fees, courier COD/RTO fees, Partial COD tab =================
-   Paste this block just ABOVE  boot();  (after the Delivery Partner block). */
+
+/* ================= PATCH 2 — gateway fees, courier COD/RTO fees, Partial COD tab ================= */
 (function(){
 const key=o=>String(o.orderId||'').replace(/^#/,'').trim().toLowerCase();
 
@@ -2033,8 +2032,8 @@ renderAll=function(){
   const c=document.getElementById('content'); c.innerHTML=''; renderPartial(c);
 };
 })();
-  /* ================= PATCH 3 — date bug, order counts, month-wise Orders =================
-   Paste this block just ABOVE  boot();  (after Patch 2). */
+
+/* ================= PATCH 3 — date bug, order counts, month-wise Orders ================= */
 (function(){
 const pad=n=>String(n).padStart(2,'0');
 const ld=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;   // LOCAL date, not UTC
@@ -2104,8 +2103,8 @@ renderOrders=function(c){
   on('of_end',e=>{of.end=e.target.value; renderAll();});
 };
 })();
- /* ================= PATCH 4 — Orders: multi-select + bulk actions, search/filter, CSV export, undo =================
-   Paste this block just ABOVE  boot();  (after Patch 3). Only wraps renderOrders — nothing else is touched. */
+
+/* ================= PATCH 4 — Orders: multi-select + bulk actions, search/filter, CSV export, undo ================= */
 (function(){
 const sel=new Set(); let undo=null, q='', fs='';
 const oid=o=>String(o.orderId||o.id).replace(/^#/,'').trim().toLowerCase();
@@ -2204,8 +2203,8 @@ renderOrders=function(c){
   filt();
 };
 })();
-  /* ================= PATCH 5 — price-safe COGS update, recovery for EVERYTHING, dashboard health check =================
-   Paste this block just ABOVE  boot();  (after Patch 4). */
+
+/* ================= PATCH 5 — price-safe COGS update, recovery for EVERYTHING, dashboard health check ================= */
 (function(){
 const oid=o=>String(o.orderId||o.id).replace(/^#/,'').trim().toLowerCase();
 
@@ -2228,7 +2227,7 @@ openModal=function(html){            // relabel the bulk-update option so it say
 
 /* 2. Recovery: every change anywhere (orders, products, stock, bank, expenses, ads, settings, delivery data, imports,
       clear-all…) is captured automatically. Last 40 versions kept in this browser (IndexedDB). */
-const NAMES={orders:'Orders',products:'Products',inventory:'Inventory',bank:'Bank',expenses:'Expenses',adSpend:'Ad spend',assumptions:'Settings',courier:'Delivery data'};
+const NAMES={orders:'Orders',products:'Products',inventory:'Inventory',bank:'Bank',expenses:'Expenses',adSpend:'Ad spend',assumptions:'Settings',courier:'Delivery data',rto:'RTO tracking'};
 let hist=[], last=null, idb=null;
 const idbOpen=()=>new Promise(r=>{try{const q=indexedDB.open('lilstep_history',1);q.onupgradeneeded=()=>q.result.createObjectStore('s',{keyPath:'ts'});q.onsuccess=()=>{idb=q.result;r();};q.onerror=()=>r();}catch(e){r();}});
 const idbAll=()=>new Promise(r=>{if(!idb)return r([]);try{const q=idb.transaction('s').objectStore('s').getAll();q.onsuccess=()=>r(q.result||[]);q.onerror=()=>r([]);}catch(e){r([]);}});
@@ -2291,8 +2290,8 @@ renderDashboard=function(c){
   const k=c.querySelector('.grid-kpi'); if(k) k.insertAdjacentHTML('beforebegin',box);
 };
 })();
-  /* ================= PATCH 6 — Upload ad spend from a CSV file =================
-   Paste this block just ABOVE  boot();  (after Patch 5).
+
+/* ================= PATCH 6 — Upload ad spend from a CSV file =================
    Adds "⬆ Upload ad spend (CSV)" on the Ad Spend tab.
    Reads: Date + (Total incl. GST  or  Ad Spend) columns. Shows a preview before saving.
    Rows with ₹0 are skipped. Every upload can be reversed with ↶ Undo / 🕘 History. */
@@ -2379,125 +2378,19 @@ renderAdSpend=function(c){
   add.parentElement.style.display='flex'; add.parentElement.style.gap='8px';
 };
 })();
-    /* ================= PATCH 7 — RTO Tracking (auto-detected, manually confirmed) =================
-   Paste this block just ABOVE  boot();  (after Patch 6).
-   Whenever an order's status is RTO or Returned, it automatically appears here.
-   You then confirm: did the courier/delivery boy actually hand the package back,
-   or are they still sitting on it / did they forget? */
-(function(){
-const oid=o=>String(o.orderId||o.id).replace(/^#/,'').trim().toLowerCase();
-const RTOSET=new Set(['RTO','Returned']);
-const STATUSES=['Pending confirmation','Received back','Not received — follow up','Lost / written off'];
 
-function R(){ return state.rto || (state.rto={}); }
+    /* ================= PATCH 7 (FINAL) — RTO Tracking + Courier & AWB + COGS recovery =================
+   HOW TO INSTALL
+   1. In your tracker file, find BOTH old "PATCH 7 — RTO Tracking" blocks. They sit one after the other,
+      right after PATCH 6 and right before  boot();
+   2. Delete both of them completely (everything between the end of PATCH 6's  })();  and  boot();).
+   3. Paste this whole block in that place, so the order is:  PATCH 6  →  this block  →  boot();
 
-/* keep the RTO list in sync with order statuses every time the tab is opened —
-   adds new entries the moment an order becomes RTO/Returned, and drops entries
-   for orders that are no longer in that status (re-attempted & delivered, or
-   corrected by mistake). Manual confirmation data is kept as long as the
-   order stays RTO/Returned. */
-function syncRto(){
-  const r=R(), seen=new Set(), groups={};
-  state.orders.forEach(o=>{ if(!RTOSET.has(o.status)) return; const k=oid(o); (groups[k]=groups[k]||[]).push(o); });
-  Object.keys(groups).forEach(k=>{
-    seen.add(k);
-    if(!r[k]) r[k]={status:'Pending confirmation', flaggedAt:new Date().toISOString(), receivedDate:'', note:''};
-  });
-  Object.keys(r).forEach(k=>{ if(!seen.has(k)) delete r[k]; });
-}
-
-function rows(){
-  syncRto();
-  const r=R(), groups={};
-  state.orders.forEach(o=>{ if(!RTOSET.has(o.status)) return; const k=oid(o); (groups[k]=groups[k]||[]).push(o); });
-  return Object.entries(groups).map(([k,lines])=>{
-    const first=computeOrder(lines[0]);
-    const qty=sum(lines.map(l=>l.qty));
-    const products=[...new Set(lines.map(l=>(getProduct(l.productId)||{}).name||'— deleted product —'))].join(', ');
-    const rec=r[k]||{status:'Pending confirmation',flaggedAt:'',receivedDate:'',note:''};
-    const days=rec.flaggedAt?Math.floor((Date.now()-new Date(rec.flaggedAt))/864e5):null;
-    return {k, date:first.date, orderId:first.orderId, customer:first.customer, products, qty,
-      grossProfit:sum(lines.map(l=>computeOrder(l).grossProfit)), ...rec, days};
-  }).sort((a,b)=>(a.date<b.date?1:-1));
-}
-
-function badgeFor(s){
-  const cls = s==='Received back'?'good': s==='Pending confirmation'?'watch': s==='Lost / written off'?'rto':'needs';
-  return `<span class="badge ${cls}">${s}</span>`;
-}
-
-function renderRto(c){
-  const list=rows();
-  const pending=list.filter(x=>x.status==='Pending confirmation');
-  const notRec=list.filter(x=>x.status==='Not received — follow up');
-  const lost=list.filter(x=>x.status==='Lost / written off');
-  const received=list.filter(x=>x.status==='Received back');
-  const overdue=pending.filter(x=>x.days!=null&&x.days>5);
-  c.innerHTML=`
-    <div class="section-head"><div><h2>RTO Tracking</h2><p>Every order the courier marks RTO or Returned lands here automatically. Use it to confirm whether the package has actually come back to you — couriers sometimes mark RTO in their system before (or without ever) physically returning the item.</p></div></div>
-    <div class="grid-kpi">
-      <div class="kpi"><div class="lbl">Total RTO orders</div><div class="val">${list.length}</div></div>
-      <div class="kpi ${pending.length?'neg':''}"><div class="lbl">Pending confirmation</div><div class="val">${pending.length}</div><div class="sub">${overdue.length} over 5 days</div></div>
-      <div class="kpi ${notRec.length?'neg':''}"><div class="lbl">Not received yet</div><div class="val">${notRec.length}</div></div>
-      <div class="kpi pos"><div class="lbl">Received back</div><div class="val">${received.length}</div></div>
-      <div class="kpi"><div class="lbl">Lost / written off</div><div class="val">${lost.length}</div></div>
-    </div>
-    ${overdue.length?`<div class="callout"><b>${overdue.length} RTO order(s)</b> have been pending confirmation for more than 5 days — worth chasing the courier/delivery boy: ${overdue.slice(0,10).map(x=>x.orderId).join(', ')}${overdue.length>10?' …':''}</div>`:''}
-    <div class="table-wrap"><table>
-      <thead><tr><th>RTO flagged</th><th>Order ID</th><th>Customer</th><th>Product(s)</th><th class="num">Qty</th><th class="num">Days pending</th><th>Confirmation status</th><th>Received date</th><th>Note</th><th class="num">Gross Profit</th><th></th></tr></thead>
-      <tbody>
-        ${list.length? list.map(x=>`
-          <tr>
-            <td>${x.flaggedAt?new Date(x.flaggedAt).toLocaleDateString('en-IN'):'—'}</td>
-            <td>${x.orderId}</td><td>${x.customer||'—'}</td><td>${x.products}</td><td class="num">${x.qty}</td>
-            <td class="num">${x.days==null?'—':x.days}</td>
-            <td>${badgeFor(x.status)}</td>
-            <td>${x.receivedDate||'—'}</td>
-            <td style="white-space:normal;max-width:220px;">${x.note||''}</td>
-            <td class="num" style="color:${x.grossProfit>=0?'var(--sage)':'var(--rose)'};font-weight:600;">${fmt(x.grossProfit)}</td>
-            <td><button class="btn small" data-rto="${x.k}">Update</button></td>
-          </tr>`).join('') : `<tr><td colspan="11" class="empty">No RTO or Returned orders right now.</td></tr>`}
-      </tbody>
-    </table></div>
-  `;
-  c.querySelectorAll('[data-rto]').forEach(b=>b.addEventListener('click',()=>rtoModal(b.dataset.rto)));
-}
-
-function rtoModal(k){
-  const r=R(), rec=r[k]||{status:'Pending confirmation',flaggedAt:new Date().toISOString(),receivedDate:'',note:''};
-  const row=rows().find(x=>x.k===k)||{orderId:k,customer:'',products:''};
-  openModal(`
-    <h3>Confirm RTO — ${row.orderId}</h3>
-    <div class="modal-sub">${row.customer||''} · ${row.products||''}${row.days!=null?` · flagged ${row.days} day(s) ago`:''}</div>
-    <div class="form-grid">
-      <div class="field full"><label>Has the delivery boy / courier actually returned this item?</label>
-        <select id="r_status">${STATUSES.map(s=>`<option value="${s}" ${rec.status===s?'selected':''}>${s}</option>`).join('')}</select>
-      </div>
-      <div class="field"><label>Date received (if applicable)</label><input type="date" id="r_date" value="${rec.receivedDate||''}"></div>
-      <div class="field full"><label>Note (condition, follow-up, who confirmed, etc.)</label><input type="text" id="r_note" value="${rec.note||''}"></div>
-    </div>
-    <div class="modal-actions"><button class="btn ghost" id="mCancel">Cancel</button><button class="btn primary" id="mSave">Save</button></div>
-  `);
-  document.getElementById('mCancel').addEventListener('click',closeModal);
-  document.getElementById('mSave').addEventListener('click',()=>{
-    const status=document.getElementById('r_status').value;
-    const receivedDate=document.getElementById('r_date').value;
-    const note=document.getElementById('r_note').value;
-    R()[k]={...rec,status,receivedDate,note};
-    closeModal(); toast('RTO status updated'); renderAll();
-  });
-}
-
-TABS.splice(TABS.findIndex(t=>t.key==='adspend')+1,0,{key:'rto',label:'RTO Tracking'});
-ICON.rto='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
-const _ra3=renderAll;
-renderAll=function(){
-  if(activeTab!=='rto') return _ra3();
-  persist(); renderNav(); document.getElementById('topTitle').textContent='RTO Tracking'; animateBalance();
-  const c=document.getElementById('content'); c.innerHTML=''; renderRto(c);
-};
-})();
-    /* ================= PATCH 7 — RTO Tracking (auto-detected, manually confirmed) + Courier & AWB ================= */
+   What this fixes
+   - "RTO Tracking" showed twice in the sidebar because the patch was pasted twice. This is one block and
+     it also refuses to add the tab again if it already exists.
+   - When you confirm an RTO as "Received back", the product cost (COGS) is returned to your books,
+     because the item is back in stock. Damaged / lost / not-received parcels keep the COGS loss. */
 (function(){
 const oid=o=>String(o.orderId||o.id).replace(/^#/,'').trim().toLowerCase();
 const RTOSET=new Set(['RTO','Returned']);
@@ -2505,6 +2398,7 @@ const STATUSES=['Pending confirmation','Received back','Received back — damage
 
 function R(){ return state.rto || (state.rto={}); }
 
+/* keeps the RTO list in sync with order statuses every time the tab opens */
 function syncRto(){
   const r=R(), seen=new Set(), groups={};
   state.orders.forEach(o=>{ if(!RTOSET.has(o.status)) return; const k=oid(o); (groups[k]=groups[k]||[]).push(o); });
@@ -2545,7 +2439,7 @@ function renderRto(c){
   const received=list.filter(x=>x.status==='Received back');
   const overdue=pending.filter(x=>x.days!=null&&x.days>5);
   c.innerHTML=`
-    <div class="section-head"><div><h2>RTO Tracking</h2><p>Every order the courier marks RTO or Returned lands here automatically. Confirm whether the package has actually come back. <b>Received back</b> returns the product cost (COGS) to your books; damaged, lost or not-received parcels keep the COGS loss.</p></div></div>
+    <div class="section-head"><div><h2>RTO Tracking</h2><p>Every order the courier marks RTO or Returned lands here automatically. Confirm whether the package has actually come back. <b>Received back</b> returns the product cost (COGS) to your books; damaged, lost or not-received parcels keep the COGS loss. Courier freight and gateway fees are real money spent, so they stay as a cost either way.</p></div></div>
     <div class="grid-kpi">
       <div class="kpi"><div class="lbl">Total RTO orders</div><div class="val">${list.length}</div></div>
       <div class="kpi ${pending.length?'neg':''}"><div class="lbl">Pending confirmation</div><div class="val">${pending.length}</div><div class="sub">${overdue.length} over 5 days</div></div>
@@ -2607,7 +2501,24 @@ function rtoModal(k){
   });
 }
 
-TABS.splice(TABS.findIndex(t=>t.key==='adspend')+1,0,{key:'rto',label:'RTO Tracking'});
+/* ---- COGS recovery: a parcel confirmed "Received back" is back in stock, so its product cost is not a loss ---- */
+const _coRto=computeOrder;
+computeOrder=function(o){
+  const r=_coRto(o);
+  if(RTOSET.has(o.status)){
+    const rec=(state.rto||{})[oid(o)];
+    if(rec&&rec.status==='Received back'&&r.totalCOGS>0){
+      r.grossProfit+=r.totalCOGS;     // product cost recovered
+      r.cogsRecovered=r.totalCOGS;
+      r.totalCOGS=0;                  // so dashboard COGS columns drop it too
+    }
+  }
+  return r;
+};
+
+/* ---- sidebar tab: added once only ---- */
+if(!TABS.some(t=>t.key==='rto'))
+  TABS.splice(TABS.findIndex(t=>t.key==='adspend')+1,0,{key:'rto',label:'RTO Tracking'});
 ICON.rto='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
 const _ra3=renderAll;
 renderAll=function(){
@@ -2616,6 +2527,7 @@ renderAll=function(){
   const c=document.getElementById('content'); c.innerHTML=''; renderRto(c);
 };
 })();
+
   boot();
 </script>
 </body>
